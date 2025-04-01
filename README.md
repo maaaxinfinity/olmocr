@@ -1,212 +1,181 @@
-<div align="center">
-  <!-- <img src="https://github.com/allenai/OLMo/assets/8812459/774ac485-a535-4768-8f7c-db7be20f5cc3" width="300"/> -->
-<img src="https://github.com/user-attachments/assets/d70c8644-3e64-4230-98c3-c52fddaeccb6" alt="olmOCR Logo" width="300"/>
-<br/>
-  <br>
-  <h1>olmOCR</h1>
-</div>
-<p align="center">
-  <a href="https://github.com/allenai/OLMo/blob/main/LICENSE">
-    <img alt="GitHub License" src="https://img.shields.io/github/license/allenai/OLMo">
-  </a>
-  <a href="https://github.com/allenai/olmocr/releases">
-    <img alt="GitHub release" src="https://img.shields.io/github/release/allenai/olmocr.svg">
-  </a>
-  <a href="https://olmocr.allenai.org/papers/olmocr.pdf">
-    <img alt="Tech Report" src="https://img.shields.io/badge/Paper-olmOCR-blue">
-  </a>
-  <a href="https://olmocr.allenai.org">
-    <img alt="Demo" src="https://img.shields.io/badge/Ai2-Demo-F0529C">
-  </a>
-  <a href="https://discord.gg/sZq3jTNVNG">
-    <img alt="Discord" src="https://img.shields.io/badge/Discord%20-%20blue?style=flat&logo=discord&label=Ai2&color=%235B65E9">
-  </a>
-</p>
+# olmocr-dify-adapter
 
-A toolkit for training language models to work with PDF documents in the wild.
+这是一个将olmocr与Dify平台集成的适配器，使用Flask提供符合OpenAI标准格式的工具API。
 
-Try the online demo: [https://olmocr.allenai.org/](https://olmocr.allenai.org/)
+## 功能
 
-What is included:
- - A prompting strategy to get really good natural text parsing using ChatGPT 4o - [buildsilver.py](https://github.com/allenai/olmocr/blob/main/olmocr/data/buildsilver.py)
- - An side-by-side eval toolkit for comparing different pipeline versions - [runeval.py](https://github.com/allenai/olmocr/blob/main/olmocr/eval/runeval.py)
- - Basic filtering by language and SEO spam removal - [filter.py](https://github.com/allenai/olmocr/blob/main/olmocr/filter/filter.py)
- - Finetuning code for Qwen2-VL and Molmo-O - [train.py](https://github.com/allenai/olmocr/blob/main/olmocr/train/train.py)
- - Processing millions of PDFs through a finetuned model using Sglang - [pipeline.py](https://github.com/allenai/olmocr/blob/main/olmocr/pipeline.py)
- - Viewing [Dolma docs](https://github.com/allenai/dolma) created from PDFs - [dolmaviewer.py](https://github.com/allenai/olmocr/blob/main/olmocr/viewer/dolmaviewer.py)
+- 提供符合OpenAI schema格式的API接口
+- 将PDF文件转换为文本内容并返回结果
+- 支持单个PDF和批量处理多个PDF
+- 可以作为Dify平台的工具调用
+- 支持任务状态检查，避免并发处理多个任务
+- 支持配置自定义模型路径
 
-### Installation
+## 安装
 
-Requirements:
- - Recent NVIDIA GPU (tested on RTX 4090, L40S, A100, H100) with at least 20 GB of GPU RAM
- - 30GB of free disk space
+1. 确保已安装olmocr及其依赖项
 
-You will need to install poppler-utils and additional fonts for rendering PDF images.
-
-Install dependencies (Ubuntu/Debian)
 ```bash
-sudo apt-get update
-sudo apt-get install poppler-utils ttf-mscorefonts-installer msttcorefonts fonts-crosextra-caladea fonts-crosextra-carlito gsfonts lcdf-typetools
-```
-
-Set up a conda environment and install olmocr
-```bash
-conda create -n olmocr python=3.11
-conda activate olmocr
-
+# 安装olmocr
 git clone https://github.com/allenai/olmocr.git
 cd olmocr
-
 pip install -e .[gpu] --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
 ```
 
-### Local Usage Example
-
-For quick testing, try the [web demo](https://olmocr.allen.ai/). To run locally, a GPU is required, as inference is powered by [sglang](https://github.com/sgl-project/sglang) under the hood.
-Convert a Single PDF:
-```bash
-python -m olmocr.pipeline ./localworkspace --pdfs tests/gnarly_pdfs/horribleocr.pdf
-```
-
-Convert an Image file:
-```bash
-python -m olmocr.pipeline ./localworkspace --pdfs random_page.png
-```
-
-Convert Multiple PDFs:
-```bash
-python -m olmocr.pipeline ./localworkspace --pdfs tests/gnarly_pdfs/*.pdf
-```
-Results will be stored as JSON in `./localworkspace`.
-
-#### Viewing Results
-
-Extracted text is stored as [Dolma](https://github.com/allenai/dolma)-style JSONL inside of the `./localworkspace/results` directory.
+2. 安装适配器依赖
 
 ```bash
-cat localworkspace/results/output_*.jsonl
+pip install -r requirements.txt
 ```
 
-View results side-by-side with the original PDFs (uses `dolmaviewer` command):
+## 配置
+
+在app.py中可以设置模型路径：
+
+```python
+# 指定模型路径
+MODEL_PATH = "/mnt/model_Q4/olmocr"
+```
+
+## 使用方法
+
+1. 启动适配器服务
 
 ```bash
-python -m olmocr.viewer.dolmaviewer localworkspace/results/output_*.jsonl
+python app.py
 ```
 
-Now open `./dolma_previews/tests_gnarly_pdfs_horribleocr_pdf.html` in your favorite browser.
-
-![image](https://github.com/user-attachments/assets/128922d1-63e6-4d34-84f2-d7901237da1f)
-
-
-### Multi-node / Cluster Usage
-
-If you want to convert millions of PDFs, using multiple nodes running in parallel, then olmOCR supports
-reading your PDFs from AWS S3, and coordinating work using an AWS S3 output bucket.
-
-For example, you can start this command on your first worker node, and it will set up
-a simple work queue in your AWS bucket and start converting PDFs.
+或使用gunicorn（生产环境推荐）:
 
 ```bash
-python -m olmocr.pipeline s3://my_s3_bucket/pdfworkspaces/exampleworkspace --pdfs s3://my_s3_bucket/jakep/gnarly_pdfs/*.pdf
+gunicorn -w 1 -b 0.0.0.0:5555 app:app
 ```
 
-Now on any subsequent nodes, just run this and they will start grabbing items from the same workspace queue.
-```bash
-python -m olmocr.pipeline s3://my_s3_bucket/pdfworkspaces/exampleworkspace
+2. 在Dify平台中配置工具
+
+在Dify平台上，添加一个新的工具，配置如下:
+
+- API URL: `http://your-server:5555/analyze_pdf` 或 `http://your-server:5555/analyze_multiple_pdfs`
+- 使用tools接口获取schema: `http://your-server:5555/tools`
+
+## API接口
+
+### 获取工具定义
+
+```
+GET /tools
 ```
 
-If you are at Ai2 and want to linearize millions of PDFs efficiently using [beaker](https://www.beaker.org), just add the `--beaker`
-flag. This will prepare the workspace on your local machine, and then launch N GPU workers in the cluster to start
-converting PDFs.
+返回符合OpenAI格式的工具schema定义。
 
-For example:
-```bash
-python -m olmocr.pipeline s3://my_s3_bucket/pdfworkspaces/exampleworkspace --pdfs s3://my_s3_bucket/jakep/gnarly_pdfs/*.pdf --beaker --beaker_gpus 4
+### 分析单个PDF文件
+
 ```
+POST /analyze_pdf
+Content-Type: application/json
 
-### Full documentation for the pipeline
-
-```bash
-python -m olmocr.pipeline --help
-usage: pipeline.py [-h] [--pdfs PDFS] [--workspace_profile WORKSPACE_PROFILE] [--pdf_profile PDF_PROFILE] [--pages_per_group PAGES_PER_GROUP]
-                   [--max_page_retries MAX_PAGE_RETRIES] [--max_page_error_rate MAX_PAGE_ERROR_RATE] [--workers WORKERS] [--apply_filter] [--stats] [--model MODEL]
-                   [--model_max_context MODEL_MAX_CONTEXT] [--model_chat_template MODEL_CHAT_TEMPLATE] [--target_longest_image_dim TARGET_LONGEST_IMAGE_DIM]
-                   [--target_anchor_text_len TARGET_ANCHOR_TEXT_LEN] [--beaker] [--beaker_workspace BEAKER_WORKSPACE] [--beaker_cluster BEAKER_CLUSTER]
-                   [--beaker_gpus BEAKER_GPUS] [--beaker_priority BEAKER_PRIORITY]
-                   workspace
-
-Manager for running millions of PDFs through a batch inference pipeline
-
-positional arguments:
-  workspace             The filesystem path where work will be stored, can be a local folder, or an s3 path if coordinating work with many workers, s3://bucket/prefix/
-
-options:
-  -h, --help            show this help message and exit
-  --pdfs PDFS           Path to add pdfs stored in s3 to the workspace, can be a glob path s3://bucket/prefix/*.pdf or path to file containing list of pdf paths
-  --workspace_profile WORKSPACE_PROFILE
-                        S3 configuration profile for accessing the workspace
-  --pdf_profile PDF_PROFILE
-                        S3 configuration profile for accessing the raw pdf documents
-  --pages_per_group PAGES_PER_GROUP
-                        Aiming for this many pdf pages per work item group
-  --max_page_retries MAX_PAGE_RETRIES
-                        Max number of times we will retry rendering a page
-  --max_page_error_rate MAX_PAGE_ERROR_RATE
-                        Rate of allowable failed pages in a document, 1/250 by default
-  --workers WORKERS     Number of workers to run at a time
-  --apply_filter        Apply basic filtering to English pdfs which are not forms, and not likely seo spam
-  --stats               Instead of running any job, reports some statistics about the current workspace
-  --model MODEL         List of paths where you can find the model to convert this pdf. You can specify several different paths here, and the script will try to use the
-                        one which is fastest to access
-  --model_max_context MODEL_MAX_CONTEXT
-                        Maximum context length that the model was fine tuned under
-  --model_chat_template MODEL_CHAT_TEMPLATE
-                        Chat template to pass to sglang server
-  --target_longest_image_dim TARGET_LONGEST_IMAGE_DIM
-                        Dimension on longest side to use for rendering the pdf pages
-  --target_anchor_text_len TARGET_ANCHOR_TEXT_LEN
-                        Maximum amount of anchor text to use (characters)
-  --beaker              Submit this job to beaker instead of running locally
-  --beaker_workspace BEAKER_WORKSPACE
-                        Beaker workspace to submit to
-  --beaker_cluster BEAKER_CLUSTER
-                        Beaker clusters you want to run on
-  --beaker_gpus BEAKER_GPUS
-                        Number of gpu replicas to run
-  --beaker_priority BEAKER_PRIORITY
-                        Beaker priority level for the job
-```
-
-
-## Team
-
-<!-- start team -->
-
-**olmOCR** is developed and maintained by the AllenNLP team, backed by [the Allen Institute for Artificial Intelligence (AI2)](https://allenai.org/).
-AI2 is a non-profit institute with the mission to contribute to humanity through high-impact AI research and engineering.
-To learn more about who specifically contributed to this codebase, see [our contributors](https://github.com/allenai/olmocr/graphs/contributors) page.
-
-<!-- end team -->
-
-## License
-
-<!-- start license -->
-
-**olmOCR** is licensed under [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0).
-A full copy of the license can be found [on GitHub](https://github.com/allenai/olmocr/blob/main/LICENSE).
-
-<!-- end license -->
-
-## Citing
-
-```bibtex
-@misc{olmocr,
-      title={{olmOCR: Unlocking Trillions of Tokens in PDFs with Vision Language Models}},
-      author={Jake Poznanski and Jon Borchardt and Jason Dunkelberger and Regan Huff and Daniel Lin and Aman Rangapur and Christopher Wilhelm and Kyle Lo and Luca Soldaini},
-      year={2025},
-      eprint={2502.18443},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2502.18443},
+{
+  "pdf_base64": "base64编码的PDF内容",
+  "filename": "文件名.pdf"
 }
 ```
+
+返回:
+
+```json
+{
+  "content": "从PDF中提取的文本内容",
+  "filename": "处理的文件名",
+  "status": "success",
+  "processing_time": 15.2
+}
+```
+
+### 批量分析多个PDF文件
+
+```
+POST /analyze_multiple_pdfs
+Content-Type: application/json
+
+{
+  "pdf_files": [
+    {
+      "pdf_base64": "第一个PDF的base64编码内容",
+      "filename": "文件1.pdf"
+    },
+    {
+      "pdf_base64": "第二个PDF的base64编码内容",
+      "filename": "文件2.pdf"
+    }
+  ]
+}
+```
+
+返回:
+
+```json
+{
+  "results": {
+    "文件1.pdf": {
+      "content": "从PDF中提取的文本内容",
+      "filename": "文件1.pdf"
+    },
+    "文件2.pdf": {
+      "content": "从PDF中提取的文本内容",
+      "filename": "文件2.pdf"
+    }
+  },
+  "total_files": 2,
+  "processed_files": 2,
+  "status": "success",
+  "processing_time": 30.5
+}
+```
+
+### 获取当前处理状态
+
+```
+GET /status
+```
+
+返回:
+
+```json
+{
+  "is_processing": false,
+  "status": "ready",
+  "task_info": null
+}
+```
+
+或当正在处理任务时:
+
+```json
+{
+  "is_processing": true,
+  "status": "busy",
+  "task_info": {
+    "type": "multiple_pdfs",
+    "start_time": 1623456789.123,
+    "status": "processing_pdfs",
+    "total_files": 2,
+    "processed_files": 1,
+    "current_file": "文件2.pdf"
+  }
+}
+```
+
+### 获取处理结果文件
+
+```
+GET /results/{filename}
+```
+
+直接下载指定的结果文件。
+
+## 注意事项
+
+- 服务一次只能处理一个任务，若任务正在处理中（不论是单个PDF还是多个PDF批量处理），新请求将返回429状态码
+- 服务需要足够的磁盘空间来存储临时PDF文件
+- 需要GPU环境以获得最佳性能
+- 大型PDF文件可能需要较长处理时间 

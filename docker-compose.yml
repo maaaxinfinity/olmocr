@@ -1,0 +1,19 @@
+version: "3"
+
+services:
+  olmocr-dify-adapter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5555:5555"
+    volumes:
+      - ./localworkspace:/app/localworkspace
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
