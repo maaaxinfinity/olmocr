@@ -174,7 +174,8 @@ def analyze_pdf():
     files_to_process_info = [] # List of dicts: {'path': saved_path, 'original_filename': original_fname}
     total_files_requested = 0
     input_source = None
-    dify_input_key = 'input_files' # Fixed key expected from Dify/Schema
+    # Expecting the Dify input variable name as the top-level key
+    dify_input_key = 'input_files' 
 
     try:
         data = request.json
@@ -186,30 +187,49 @@ def analyze_pdf():
         pdf_save_dir = os.path.join(main_task_workspace, "pdfs_to_process")
         os.makedirs(pdf_save_dir, exist_ok=True)
 
-        if dify_input_key in data and isinstance(data[dify_input_key], list) and len(data[dify_input_key]) >= 1:
-            # Priority 1: Dify file input
-            app.logger.info(f"Detected input using Dify key: {dify_input_key}")
-            dify_files_info = data[dify_input_key]
-            input_source = f'dify_{dify_input_key}'
-            total_files_requested = len(dify_files_info)
-            with task_lock:
-                current_task["status"] = "preparing_files"
-                current_task["total_files_requested"] = total_files_requested
-                current_task["files_prepared_count"] = 0
-
-            for idx, file_info in enumerate(dify_files_info):
-                original_fname = file_info.get('filename', f'unknown_dify_{idx}.pdf')
+        # Check for the top-level key Dify uses (e.g., 'input_files')
+        if dify_input_key in data:
+            # Dify passes the file info nested inside the variable object
+            # The actual file list is usually under a key named "files"
+            dify_variable_value = data[dify_input_key]
+            if isinstance(dify_variable_value, dict) and 'files' in dify_variable_value and isinstance(dify_variable_value['files'], list):
+                app.logger.info(f"Detected Dify input structure under key '{dify_input_key}'. Extracting from nested 'files' array.")
+                dify_files_info = dify_variable_value['files'] # <--- Extract the nested list
+                if not dify_files_info:
+                     raise ValueError(f"Dify variable '{dify_input_key}' contained an empty nested 'files' list.")
+                
+                input_source = f'dify_{dify_input_key}'
+                total_files_requested = len(dify_files_info)
                 with task_lock:
-                     current_task["current_file_preparing"] = original_fname
-                try:
-                    saved_path, original_fname_used = download_dify_file(file_info, pdf_save_dir)
-                    files_to_process_info.append({'path': saved_path, 'original_filename': original_fname_used})
+                    current_task["status"] = "preparing_files"
+                    current_task["total_files_requested"] = total_files_requested
+                    current_task["files_prepared_count"] = 0
+
+                for idx, file_info in enumerate(dify_files_info):
+                    original_fname = file_info.get('filename', f'unknown_dify_{idx}.pdf')
                     with task_lock:
-                        current_task["files_prepared_count"] = len(files_to_process_info)
-                except (ValueError, ConnectionError, IOError) as e:
-                     app.logger.warning(f"Skipping Dify file {original_fname} due to prepare error: {e}")
-                     # Optionally store error for this file? For now, just skip.
-                     continue
+                         current_task["current_file_preparing"] = original_fname
+                    try:
+                        # Pass the file_info object directly
+                        saved_path, original_fname_used = download_dify_file(file_info, pdf_save_dir)
+                        files_to_process_info.append({'path': saved_path, 'original_filename': original_fname_used})
+                        with task_lock:
+                            current_task["files_prepared_count"] = len(files_to_process_info)
+                    except (ValueError, ConnectionError, IOError) as e:
+                         app.logger.warning(f"Skipping Dify file {original_fname} due to prepare error: {e}")
+                         continue
+            else:
+                 # Fallback or error if the structure is not as expected
+                 app.logger.warning(f"Received key '{dify_input_key}' but its value is not a dict with a 'files' list: {dify_variable_value}")
+                 # Try to see if maybe the top level value IS the list itself (less likely now)
+                 if isinstance(dify_variable_value, list) and len(dify_variable_value) >= 1:
+                     app.logger.info(f"Attempting to process value of '{dify_input_key}' as the file list directly.")
+                     dify_files_info = dify_variable_value
+                     # ... (duplicate the file processing loop here or refactor) ...
+                     # For simplicity, let's just raise error if nested 'files' not found for now
+                     raise ValueError(f"键 '{dify_input_key}' 的值不是预期的包含 'files' 列表的对象结构。")
+                 else:
+                     raise ValueError(f"键 '{dify_input_key}' 存在但其值不是包含 'files' 列表的对象结构或文件列表。")
 
         elif 'pdf_list' in data and isinstance(data['pdf_list'], list) and len(data['pdf_list']) >= 1:
             # Priority 2: Base64 list input
@@ -238,7 +258,7 @@ def analyze_pdf():
                      app.logger.warning(f"Skipping base64 file {original_fname} due to prepare error: {e}")
                      continue
         else:
-            raise ValueError(f"无效的输入格式，需要提供 '{dify_input_key}' (Dify文件对象列表) 或 'pdf_list' (含filename和pdf_base64的对象列表). 收到的keys: {list(data.keys())}")
+            raise ValueError(f"无效的输入格式，需要提供 '{dify_input_key}' (其内部包含'files'列表) 或 'pdf_list'. 收到的keys: {list(data.keys())}")
 
         if not files_to_process_info:
              raise ValueError("没有成功准备任何文件进行处理")
