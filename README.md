@@ -5,7 +5,7 @@
 ## 功能
 
 - 提供符合OpenAPI schema格式的API接口
-- 接收Dify的文件对象输入 (键名为在Dify中定义的变量名, 如`DOC`) 或 Base64编码文件输入
+- 接收Dify的文件对象输入 (键名为`input_files`) 或 Base64编码文件输入
 - 将PDF文件转换为文本内容并返回结果 (结果嵌套在 `analysis_output` 键下)
 - 支持单个PDF和批量处理多个PDF
 - 可以作为Dify平台的工具调用
@@ -35,7 +35,7 @@ pip install -r requirements.txt
 
 - `MODEL_PATH`: olmocr模型的本地路径 (默认: `/mnt/model_Q4/olmocr`)
 - `DIFY_BASE_URL`: 你的Dify服务的基础URL，用于下载文件 (默认: `http://localhost:3000`)
-- **Dify输入键名**: 在`app.py`中修改`dify_input_key`变量 (当前设置为`'DOC'`)，使其与你在Dify工具中定义的File类型变量名一致。
+- **Dify输入键名**: 在`app.py`中，文件输入的固定键名被设置为`input_files`。请确保在Dify工具配置中也使用此名称。
 
 ## 使用方法
 
@@ -60,9 +60,9 @@ gunicorn -w 1 -b 0.0.0.0:5555 app:app
 在Dify平台上，添加一个新的工具，配置如下:
 
 - API URL: `http://your-adapter-server:5555/analyze_pdf` 或 `http://your-adapter-server:5555/analyze_multiple_pdfs`
-- 使用tools接口获取schema: `http://your-adapter-server:5555/tools`
+- 使用tools接口获取schema: `http://your-adapter-server:5555/tools` (此Schema现在指定使用`input_files`键)
 - **在工具参数中:**
-    - **定义一个`File`类型的变量 (例如，命名为`DOC`)**。确保这个名称与`app.py`中的`dify_input_key`变量值匹配。
+    - **定义一个`File`类型的变量，并将其命名为 `input_files`**。这是必需的，以便Dify将文件信息放入正确的JSON键中。
     - 如果希望也能通过Base64传递，可以在Dify的工具描述中说明接受`pdf_base64`和`filename` (或`pdf_list`)。
 
 ## API接口
@@ -73,7 +73,7 @@ gunicorn -w 1 -b 0.0.0.0:5555 app:app
 GET /tools
 ```
 
-返回符合OpenAPI格式的工具schema定义 (注意: schema使用`oneOf`表示可选输入，且目前未完全反映`dify_input_key`的动态性)。
+返回符合OpenAPI格式的工具schema定义 (使用`oneOf`表示可选输入，Dify文件输入键固定为`input_files`)。
 
 ### 分析单个PDF文件
 
@@ -84,7 +84,7 @@ POST /analyze_pdf
 Content-Type: application/json
 
 {
-  "DOC": [ // <-- 键名与app.py中的dify_input_key匹配
+  "input_files": [ // <-- 键名固定为 input_files
     { // Dify提供的文件对象
       "url": "/files/.../file-preview?timestamp=...",
       "filename": "文件名.pdf",
@@ -128,7 +128,7 @@ POST /analyze_multiple_pdfs
 Content-Type: application/json
 
 {
-  "DOC": [ // <-- 键名与app.py中的dify_input_key匹配
+  "input_files": [ // <-- 键名固定为 input_files
     { "url": "/files/...", "filename": "文件1.pdf", ... },
     { "url": "/files/...", "filename": "文件2.pdf", ... }
   ]
@@ -185,9 +185,9 @@ GET /status
 
 ## 注意事项
 
-- **确保`app.py`中的`dify_input_key`与你在Dify工具中定义的File变量名一致 (当前设为`'DOC'`)。**
-- API优先使用Dify变量键 (如`DOC`) 输入。如果该键不存在或无效，才会尝试`pdf_base64`/`pdf_list`。
-- 确保配置正确的`DIFY_BASE_URL`以便Dify文件输入能正常工作。
+- **确保在Dify工具配置中，文件输入变量的名称是 `input_files`。**
+- API优先使用`input_files`键输入。如果该键不存在或无效，才会尝试`pdf_base64`/`pdf_list`。
+- 确保配置正确的`DIFY_BASE_URL`以便`input_files`输入能正常工作。
 - 服务一次只能处理一个任务，若任务正在处理中，新请求将返回429状态码。
 - 服务需要足够的磁盘空间来存储临时PDF文件。
 - 需要GPU环境以获得最佳性能。

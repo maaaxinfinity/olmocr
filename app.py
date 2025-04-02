@@ -210,8 +210,8 @@ def analyze_pdf():
         pdf_path = None
         filename = None
         input_source = None
-        # >>> Use 'DOC' as the key from Dify input <<<
-        dify_input_key = 'DOC' 
+        # >>> Use 'input_files' as the key from Dify input <<<
+        dify_input_key = 'input_files' 
 
         # Create a temporary directory for this single file task
         task_workspace = tempfile.mkdtemp(dir=WORKSPACE_DIR)
@@ -233,6 +233,7 @@ def analyze_pdf():
             with task_lock:
                  current_task["status"] = "pdf_saved"
         else:
+            # Include the expected key in the error message
             raise ValueError(f"无效的输入格式，需要提供 '{dify_input_key}' (含一个元素) 或 'pdf_base64' 与 'filename'. 收到的keys: {list(data.keys())}")
         # ---------------------------------------------
 
@@ -361,8 +362,8 @@ def analyze_multiple_pdfs():
         input_source = None
         files_to_process_info = [] # Store dicts {'path': path, 'original_filename': fname}
         total_files_requested = 0
-        # >>> Use 'DOC' as the key from Dify input <<<
-        dify_input_key = 'DOC'
+        # >>> Use 'input_files' as the key from Dify input <<<
+        dify_input_key = 'input_files'
 
         # Check if the key Dify uses exists and is valid
         if dify_input_key in data and isinstance(data[dify_input_key], list) and len(data[dify_input_key]) > 0:
@@ -414,6 +415,7 @@ def analyze_multiple_pdfs():
                      app.logger.warning(f"Skipping base64 file {item.get('filename', 'N/A')} due to save error: {e}")
                      continue
         else:
+             # Include the expected key in the error message
             raise ValueError(f"无效的输入格式，需要提供 '{dify_input_key}' (Dify文件对象列表) 或 'pdf_list' (含filename和pdf_base64的对象列表). 收到的keys: {list(data.keys())}")
 
         if not files_to_process_info:
