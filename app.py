@@ -14,6 +14,19 @@ import logging
 
 app = Flask(__name__)
 
+# --- Logging Setup ---
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# You might want to redirect Flask's default logger to use your config
+# Or configure Flask's logger directly:
+app.logger.setLevel(logging.INFO) # Or DEBUG for more verbosity
+handler = logging.StreamHandler() # Log to stderr
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+if not app.logger.handlers: # Avoid adding duplicate handlers
+    app.logger.addHandler(handler)
+# --------------------
+
 # --- Configuration ---
 # Create work directory
 WORKSPACE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "localworkspace")
@@ -35,49 +48,77 @@ task_lock = threading.Lock()
 def download_dify_file(file_url_rel, filename_orig, target_dir):
     # Now receives relative URL and original filename separately
     if not file_url_rel or not filename_orig:
+        app.logger.error("download_dify_file called with missing file_url_rel or filename_orig") # Added log
         raise ValueError("download_dify_file requires both file_url_rel and filename_orig")
 
-    filename = secure_filename(filename_orig) # Sanitize for saving
-    # Ensure filename has the correct extension if missing from secure_filename result
+    # Sanitize filename for saving, trying to preserve original extension
+    filename_secure = secure_filename(filename_orig)
     original_ext = os.path.splitext(filename_orig.lower())[1] or '.pdf' # Default to .pdf if no ext
-    if not filename.lower().endswith(original_ext):
-         filename = os.path.splitext(filename)[0] + original_ext
+    # If secure_filename removed the extension, add the original one back
+    if not filename_secure or os.path.splitext(filename_secure.lower())[1] != original_ext:
+        base_name = os.path.splitext(filename_secure)[0] if filename_secure else filename_orig # Use original if secure is empty
+        filename = base_name + original_ext
+    else:
+        filename = filename_secure
 
-    download_url = f"{DIFY_BASE_URL.rstrip('/')}{file_url_rel}"
+    app.logger.info(f"Sanitized filename: '{filename_orig}' -> '{filename}'") # Added log
+
+    # Construct full download URL, ensuring no double slashes
+    full_download_url = f"{DIFY_BASE_URL.rstrip('/')}/{file_url_rel.lstrip('/')}"
     target_path = os.path.join(target_dir, filename)
+    app.logger.info(f"Attempting to download from URL: {full_download_url}") # Added log
+    app.logger.info(f"Saving to local path: {target_path}") # Added log
 
     try:
-        app.logger.info(f"Downloading from {download_url} to {target_path}")
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
+        response = requests.get(full_download_url, stream=True, timeout=60)
+        app.logger.info(f"Download request sent. Response status code: {response.status_code}") # Added log
+        response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
         with open(target_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-        app.logger.info(f"Successfully downloaded {filename_orig}")
+        app.logger.info(f"Successfully downloaded and saved '{filename_orig}' as '{filename}' to {target_path}") # Enhanced log
         # Return the saved path and the sanitized/saved filename
         return target_path, filename
+    except requests.exceptions.Timeout:
+        app.logger.error(f"Timeout occurred while downloading {filename_orig} from {full_download_url}")
+        raise ConnectionError(f"Timeout downloading file {filename_orig} from Dify {full_download_url}")
+    except requests.exceptions.HTTPError as e:
+        app.logger.error(f"HTTP Error {e.response.status_code} while downloading {filename_orig} from {full_download_url}: {e.response.text[:500]}") # Log response text excerpt
+        raise ConnectionError(f"HTTP Error {e.response.status_code} downloading file {filename_orig} from Dify {full_download_url}")
     except requests.exceptions.RequestException as e:
-        raise ConnectionError(f"Failed to download file {filename_orig} from Dify {download_url}: {e}")
+        app.logger.error(f"Failed to download file {filename_orig} from Dify {full_download_url}: {e}", exc_info=True) # Add stack trace
+        raise ConnectionError(f"Failed to download file {filename_orig} from Dify {full_download_url}: {e}")
+    except IOError as e:
+        app.logger.error(f"Failed to save downloaded file {filename_orig} to {target_path}: {e}", exc_info=True) # Add stack trace
+        raise IOError(f"Failed to save downloaded file {filename_orig}: {e}")
     except Exception as e:
+        app.logger.error(f"An unexpected error occurred during download/saving of {filename_orig}: {e}", exc_info=True) # Catch-all with trace
         raise IOError(f"Failed to save downloaded file {filename_orig}: {e}")
 
-# Helper function to save base64 encoded file
+# Helper function to save base64 encoded file (Adding logging here too for completeness)
 def save_base64_file(b64_string, filename_req, target_dir):
+    app.logger.info(f"Attempting to save base64 data for requested filename: {filename_req}") # Added log
     try:
         filename = secure_filename(filename_req)
         # Ensure filename has a pdf extension if missing
         if not filename.lower().endswith('.pdf'):
             filename += '.pdf'
         target_path = os.path.join(target_dir, filename)
+        app.logger.info(f"Saving base64 data to local path: {target_path}") # Added log
         pdf_data = base64.b64decode(b64_string)
         with open(target_path, 'wb') as f:
             f.write(pdf_data)
-        app.logger.info(f"Successfully saved base64 file as {filename}")
+        app.logger.info(f"Successfully saved base64 file as '{filename}' from request '{filename_req}'") # Enhanced log
         # Return the original filename for mapping, and the saved path
         return target_path, filename_req
     except base64.binascii.Error as e:
+        app.logger.error(f"Invalid base64 encoding for file {filename_req}: {e}") # Added log
         raise ValueError(f"Invalid base64 encoding for file {filename_req}: {e}")
+    except IOError as e:
+        app.logger.error(f"Failed to save base64 file {filename_req} to {target_path}: {e}", exc_info=True) # Added log with trace
+        raise IOError(f"Failed to save base64 file {filename_req}: {e}")
     except Exception as e:
+        app.logger.error(f"An unexpected error occurred during base64 saving of {filename_req}: {e}", exc_info=True) # Catch-all with trace
         raise IOError(f"Failed to save base64 file {filename_req}: {e}")
 
 # Define tool schema
@@ -130,21 +171,27 @@ def get_status():
 @app.route("/analyze_pdf", methods=["GET"])
 def analyze_pdf():
     """处理单个PDF分析请求 (通过URL和文件名参数). OLMOCR仍顺序执行."""
+    request_start_time = time.time() # Log request duration
+    app.logger.info("-" * 40) # Separator for new request
+    app.logger.info(f"Received GET request for /analyze_pdf")
     global current_task
 
     # Extract parameters from query string
     file_url = request.args.get('file_url')
     original_filename = request.args.get('filename')
 
-    app.logger.info(f"Received request for /analyze_pdf (GET)")
-    app.logger.debug(f"Query Parameters: file_url={file_url}, filename={original_filename}")
+    app.logger.info(f"Received Parameters: file_url='{file_url}', filename='{original_filename}'") # Log received params
 
     if not file_url or not original_filename:
-        return jsonify({"error": "缺少必需的查询参数 'file_url' 或 'filename'"}, 400)
+        app.logger.warning("Request rejected: Missing 'file_url' or 'filename' query parameter.") # Added log
+        return jsonify({"error": "缺少必需的查询参数 'file_url' 或 'filename'"}), 400
 
+    app.logger.info(f"Attempting to acquire task lock for filename: {original_filename}")
     with task_lock:
+        app.logger.info("Task lock acquired.")
         if current_task:
             task_info_safe = {k: v for k, v in current_task.items() if k != 'command'}
+            app.logger.warning(f"Server busy, rejecting request for {original_filename}. Current task: {task_info_safe}") # Added log
             return jsonify({
                 "error": "服务器忙，当前有任务正在处理中",
                 "status": "busy",
@@ -159,132 +206,253 @@ def analyze_pdf():
             "input_filename": original_filename, # Log input filename
             "input_url": file_url
         }
+        app.logger.info(f"Initialized new task: {current_task}") # Added log
 
     # Create a main temporary directory for this single file task
-    main_task_workspace = None 
+    main_task_workspace = None
+    saved_pdf_path = None # Define outside try block
     try:
         # --- Stage 1: Prepare the single input file --- 
         main_task_workspace = tempfile.mkdtemp(dir=WORKSPACE_DIR)
+        app.logger.info(f"Created main task workspace: {main_task_workspace}")
         pdf_save_dir = os.path.join(main_task_workspace, "pdf_to_process") # Dir for one pdf
         os.makedirs(pdf_save_dir, exist_ok=True)
+        app.logger.info(f"Created PDF save subdirectory: {pdf_save_dir}")
 
         with task_lock:
             current_task["status"] = "downloading_pdf"
             current_task["current_file_preparing"] = original_filename
+            current_task["workspace"] = main_task_workspace # Log workspace
+            app.logger.info(f"Task status updated: {current_task['status']}")
         
+        app.logger.info(f"Starting download for: {original_filename}")
         # Download the file using the provided URL and filename
         saved_pdf_path, saved_filename = download_dify_file(file_url, original_filename, pdf_save_dir)
-        app.logger.info(f"File prepared at: {saved_pdf_path}")
+        app.logger.info(f"File download successful. Saved path: {saved_pdf_path}, Saved filename: {saved_filename}")
 
         with task_lock:
             # Update status after successful download/save
             current_task["status"] = "file_prepared"
             current_task["prepared_filepath"] = saved_pdf_path # Log path
             del current_task["current_file_preparing"] # Clear prep state
+            app.logger.info(f"Task status updated: {current_task['status']}")
         # ---------------------------------------------
 
         # --- Stage 2: Process the single prepared file --- 
         file_status = "failed" # Default status for this file
         file_content = None
         error_detail = None
+        result_files = [] # Initialize
 
         with task_lock:
             current_task["status"] = "processing_pdf"
             current_task["current_file_processing"] = original_filename
+            app.logger.info(f"Task status updated: {current_task['status']}")
 
         # OLMOCR processing is still sequential relative to other API calls due to the lock
         # Use the main_task_workspace for olmocr run (it contains the pdf_save_dir)
         olmocr_output_path = os.path.join(main_task_workspace, "results")
         os.makedirs(olmocr_output_path, exist_ok=True)
+        app.logger.info(f"Created olmocr output directory: {olmocr_output_path}")
 
         try:
             # Execute olmocr command for the single file in the workspace
+            # IMPORTANT: The olmocr script expects the DIRECTORY containing PDFs, not the PDF itself.
+            # And it processes ALL PDFs in that directory (or specified by --pdfs relative to it).
+            # Since we only have one PDF, we pass the pdf_save_dir as the input path
+            # and optionally use --pdfs to be explicit (though maybe not needed if it's the only pdf there)
             cmd = [
                 "python", "-m", "olmocr.pipeline",
-                main_task_workspace, # The workspace containing the pdf subdir
-                "--pdfs", saved_pdf_path, # Point directly to the saved PDF
+                pdf_save_dir, # Directory containing the PDF to process
+                #"--pdfs", saved_filename, # Use saved_filename relative to pdf_save_dir
+                "--output", olmocr_output_path, # Explicitly set output directory
                 "--model", MODEL_PATH
             ]
-            app.logger.info(f"Running olmocr for {original_filename}: {' '.join(cmd)}")
-            process = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=300) # Add timeout
-            app.logger.info(f"olmocr process for {original_filename} finished with code {process.returncode}")
+            app.logger.info(f"Running olmocr command for '{original_filename}': {' '.join(cmd)}")
+            with task_lock: # Log command within task status
+                current_task['command'] = ' '.join(cmd)
+
+            process_start_time = time.time() # Log OLMOCR duration
+            process = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=600) # Increased timeout to 10 mins
+            process_duration = time.time() - process_start_time
+            app.logger.info(f"olmocr process for '{original_filename}' finished in {process_duration:.2f} seconds with return code {process.returncode}")
+            if process.stdout:
+                app.logger.debug(f"olmocr stdout for {original_filename}:\n{process.stdout}") # Log stdout at debug level
             if process.stderr:
-                app.logger.warning(f"olmocr stderr for {original_filename}:\n{process.stderr}")
+                # Log stderr as warning or error based on return code
+                log_level = logging.WARNING if process.returncode == 0 else logging.ERROR
+                app.logger.log(log_level, f"olmocr stderr for {original_filename}:\n{process.stderr}")
 
             if process.returncode != 0:
-                raise RuntimeError(f"olmocr处理失败 (Code: {process.returncode}): {process.stderr}")
+                error_detail = f"olmocr处理失败 (Code: {process.returncode}): {process.stderr}" # Keep original error format
+                app.logger.error(error_detail)
+                raise RuntimeError(error_detail)
 
             # Find the result file in the workspace result dir
+            # Result filename usually contains the original PDF name (or sanitized version)
+            # Example: output_1.证据材料卷（第一册）（公安卷）_可搜索.jsonl
+            # Let's be more robust and just find any output_*.jsonl file
             result_files = glob.glob(os.path.join(olmocr_output_path, "output_*.jsonl"))
+            app.logger.info(f"Searching for result file in {olmocr_output_path}. Found: {result_files}") # Added log
             if not result_files:
-                raise FileNotFoundError("未找到olmocr结果文件")
+                error_detail = f"未在 {olmocr_output_path} 中找到olmocr结果文件 (output_*.jsonl)" # More specific error
+                app.logger.error(error_detail)
+                raise FileNotFoundError(error_detail)
+            elif len(result_files) > 1:
+                 app.logger.warning(f"发现多个结果文件，将使用第一个: {result_files[0]}")
 
+            result_file_path = result_files[0]
+            app.logger.info(f"Reading results from: {result_file_path}") # Added log
             # Read result content
-            with open(result_files[0], 'r', encoding='utf-8') as f:
+            with open(result_file_path, 'r', encoding='utf-8') as f:
                 result_content = f.read().strip()
+            app.logger.info(f"Successfully read {len(result_content)} characters from result file.")
 
             # Parse results
+            app.logger.info("Parsing result content (JSONL)...")
             file_results_parsed = []
-            for line in result_content.split('\n'):
+            lines = result_content.split('\n')
+            for i, line in enumerate(lines):
                 if line.strip():
-                    file_results_parsed.append(json.loads(line))
+                    try:
+                        file_results_parsed.append(json.loads(line))
+                    except json.JSONDecodeError as json_err:
+                        app.logger.error(f"Failed to parse JSON line {i+1} in {result_file_path}: {json_err}")
+                        app.logger.error(f"Problematic line content: {line[:200]}...")
+                        # Decide whether to skip or raise an error - let's skip for now
+                        # raise ValueError(f"结果文件 {result_file_path} 中包含无效的JSON行")
+            app.logger.info(f"Successfully parsed {len(file_results_parsed)} lines from result file.")
 
             # Extract text
+            app.logger.info("Extracting text from parsed results...")
             extracted_text = ""
             if file_results_parsed:
                 for res in file_results_parsed:
                     if 'text' in res:
                         extracted_text += res['text'] + "\n\n"
+            app.logger.info(f"Extracted {len(extracted_text)} characters of text.")
 
             file_content = extracted_text.strip()
             file_status = "success"
+            app.logger.info(f"Processing successful for {original_filename}")
 
-        except (FileNotFoundError, RuntimeError, subprocess.TimeoutExpired) as e:
-            error_detail = f"处理文件 '{original_filename}' 时出错: {e}"
+        except FileNotFoundError as e:
+            # Already logged above, just set error detail
+            error_detail = str(e)
+            file_status = "error_finding_result"
+        except RuntimeError as e: # Catch olmocr execution error
+            # Already logged above, just set error detail
+            error_detail = str(e)
+            file_status = "error_olmocr_execution"
+        except subprocess.TimeoutExpired as e:
+            error_detail = f"处理文件 '{original_filename}' 时超时 ({e.timeout} 秒)"
             app.logger.error(error_detail)
+            file_status = "error_timeout"
+        except json.JSONDecodeError as e: # Catch potential error during manual parsing if needed
+            error_detail = f"解析结果文件 '{result_file_path}' 时出错: {e}"
+            app.logger.error(error_detail, exc_info=True)
+            file_status = "error_parsing_result"
         except Exception as e:
             error_detail = f"处理文件 '{original_filename}' 时发生意外错误: {e}"
-            app.logger.error(error_detail, exc_info=True)
+            app.logger.error(error_detail, exc_info=True) # Log full trace for unexpected errors
+            file_status = "error_unexpected"
+        finally:
+             with task_lock:
+                 if current_task and "current_file_processing" in current_task:
+                     del current_task["current_file_processing"]
+                     app.logger.info("Cleared 'current_file_processing' from task status.")
         # ---------------------------------------------
 
         # --- Stage 3: Prepare final response --- 
-        analysis_result = {
-            # Use original filename provided in request
-            "filename": original_filename,
-            "content": file_content,
+        app.logger.info(f"Preparing final response for {original_filename}. Status: {file_status}")
+        final_result = {
+            "filename": original_filename, # Use the original filename provided in the request
             "status": file_status,
-            "error": error_detail, # Will be None on success
-            "processing_time": time.time() - current_task["start_time"]
+            "content": file_content if file_status == "success" else None,
+            "error": error_detail if file_status != "success" else None
         }
-        response_data = {"analysis_output": analysis_result}
+        
+        response_data = {"analysis_output": final_result}
+        response_status_code = 200 if file_status == "success" else 500 # Return 500 for errors
+        
+        app.logger.info(f"Sending response. Status Code: {response_status_code}, Filename: {original_filename}, Result Status: {file_status}")
+        if error_detail:
+             app.logger.info(f"Error Detail in Response: {error_detail}")
+        elif file_status == "success":
+             app.logger.info(f"Response Content Length: {len(file_content) if file_content else 0}")
+        
+        return jsonify(response_data), response_status_code
 
-        # Clean up the main task workspace
-        shutil.rmtree(main_task_workspace, ignore_errors=True)
-        main_task_workspace = None
-
-        # Reset task status
+    except ConnectionError as e:
+        # Handle download/connection errors specifically
+        app.logger.error(f"Connection error during file preparation for {original_filename}: {e}", exc_info=True)
+        with task_lock:
+            current_task = None # Release lock as task failed early
+        return jsonify({
+            "error": f"无法从提供的URL下载文件: {e}",
+            "filename": original_filename,
+            "status": "error_downloading"
+        }), 500
+    except ValueError as e:
+        # Handle potential base64 errors if that path were used, or other value errors
+        app.logger.error(f"Value error during file preparation for {original_filename}: {e}", exc_info=True)
         with task_lock:
             current_task = None
-
-        return jsonify(response_data)
-
-    except (ValueError, ConnectionError, IOError) as e: # Errors during initial file prep
-        err_msg = f"文件准备错误 (url={file_url}, filename={original_filename}): {e}"
-        app.logger.error(err_msg)
+        return jsonify({
+            "error": f"文件准备阶段出错: {e}",
+            "filename": original_filename,
+            "status": "error_preparation_value"
+        }), 400 # Bad request if value error (e.g., bad base64)
+    except IOError as e:
+        # Handle file saving errors (download or base64)
+        app.logger.error(f"IO error during file preparation for {original_filename}: {e}", exc_info=True)
         with task_lock:
             current_task = None
+        return jsonify({
+            "error": f"保存文件时出错: {e}",
+            "filename": original_filename,
+            "status": "error_saving_file"
+        }), 500
+    except Exception as e:
+        # Catch-all for unexpected errors during setup or processing stages before response prep
+        app.logger.error(f"Unexpected error during processing for {original_filename}: {e}", exc_info=True)
+        # Ensure lock is released if an unexpected error occurs
+        with task_lock:
+            current_task = None
+        return jsonify({"error": f"处理过程中发生意外服务器错误: {e}"}), 500
+    finally:
+        # --- Stage 4: Cleanup and release lock --- 
+        app.logger.info("Entering finally block for cleanup.")
+        with task_lock:
+            if current_task:
+                current_task["end_time"] = time.time()
+                current_task["duration"] = current_task["end_time"] - current_task["start_time"]
+                current_task["status"] = "completed" # Mark as completed regardless of internal status
+                app.logger.info(f"Task completed. Final status: {current_task}")
+                current_task = None # Release the lock/task slot
+                app.logger.info("Task slot released.")
+        
+        # Clean up the main temporary workspace directory
         if main_task_workspace and os.path.exists(main_task_workspace):
-             shutil.rmtree(main_task_workspace, ignore_errors=True)
-        return jsonify({"error": err_msg}), 400
-    except Exception as e: # Catch-all for unexpected errors
-        err_msg = f"服务器内部错误: {e}"
-        app.logger.error(err_msg, exc_info=True)
-        with task_lock:
-            current_task = None
-        if main_task_workspace and os.path.exists(main_task_workspace):
-             shutil.rmtree(main_task_workspace, ignore_errors=True)
-        return jsonify({"error": err_msg}), 500
+            try:
+                shutil.rmtree(main_task_workspace)
+                app.logger.info(f"Successfully removed workspace: {main_task_workspace}")
+            except OSError as e:
+                app.logger.error(f"无法删除临时工作区 {main_task_workspace}: {e}")
+        elif main_task_workspace:
+            app.logger.warning(f"Workspace directory {main_task_workspace} not found for cleanup.")
+        request_duration = time.time() - request_start_time
+        app.logger.info(f"Request completed in {request_duration:.2f} seconds.")
+        app.logger.info("-" * 40) # Separator end of request
+# -----------------------------------------
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s [%(threadName)s]')
-    app.run(host="0.0.0.0", port=5555, debug=True) 
+if __name__ == '__main__':
+    # Set log level from environment variable, default to INFO
+    log_level_name = os.environ.get('LOG_LEVEL', 'INFO').upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
+    app.logger.setLevel(log_level)
+    # Ensure the handler also respects the level
+    for h in app.logger.handlers:
+        h.setLevel(log_level)
+    app.logger.info(f"Starting Flask server with log level {log_level_name}")
+    app.run(host='0.0.0.0', port=5001, debug=False) # debug=False for production/testing logging 
