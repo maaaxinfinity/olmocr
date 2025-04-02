@@ -4,8 +4,8 @@
 
 ## 功能
 
-- 提供符合OpenAI schema格式的API接口
-- 接收Dify的文件对象输入 (优先) 或 Base64编码文件输入
+- 提供符合OpenAPI schema格式的API接口
+- 接收Dify的文件对象输入 (键名为在Dify中定义的变量名, 如`DOC`) 或 Base64编码文件输入
 - 将PDF文件转换为文本内容并返回结果 (结果嵌套在 `analysis_output` 键下)
 - 支持单个PDF和批量处理多个PDF
 - 可以作为Dify平台的工具调用
@@ -35,6 +35,7 @@ pip install -r requirements.txt
 
 - `MODEL_PATH`: olmocr模型的本地路径 (默认: `/mnt/model_Q4/olmocr`)
 - `DIFY_BASE_URL`: 你的Dify服务的基础URL，用于下载文件 (默认: `http://localhost:3000`)
+- **Dify输入键名**: 在`app.py`中修改`dify_input_key`变量 (当前设置为`'DOC'`)，使其与你在Dify工具中定义的File类型变量名一致。
 
 ## 使用方法
 
@@ -61,8 +62,8 @@ gunicorn -w 1 -b 0.0.0.0:5555 app:app
 - API URL: `http://your-adapter-server:5555/analyze_pdf` 或 `http://your-adapter-server:5555/analyze_multiple_pdfs`
 - 使用tools接口获取schema: `http://your-adapter-server:5555/tools`
 - **在工具参数中:**
-    - 如果主要使用Dify文件上传，将文件输入变量类型设置为`File` (文件)
-    - 如果希望也能通过Base64传递，可以在Dify的工具描述中说明接受`pdf_base64`和`filename` (或`pdf_list`)，但Dify界面本身可能不直接支持非文件类型的复杂输入构造。
+    - **定义一个`File`类型的变量 (例如，命名为`DOC`)**。确保这个名称与`app.py`中的`dify_input_key`变量值匹配。
+    - 如果希望也能通过Base64传递，可以在Dify的工具描述中说明接受`pdf_base64`和`filename` (或`pdf_list`)。
 
 ## API接口
 
@@ -72,7 +73,7 @@ gunicorn -w 1 -b 0.0.0.0:5555 app:app
 GET /tools
 ```
 
-返回符合OpenAPI格式的工具schema定义 (注意: schema使用`oneOf`表示可选输入)。
+返回符合OpenAPI格式的工具schema定义 (注意: schema使用`oneOf`表示可选输入，且目前未完全反映`dify_input_key`的动态性)。
 
 ### 分析单个PDF文件
 
@@ -83,14 +84,11 @@ POST /analyze_pdf
 Content-Type: application/json
 
 {
-  "files": [
+  "DOC": [ // <-- 键名与app.py中的dify_input_key匹配
     { // Dify提供的文件对象
       "url": "/files/.../file-preview?timestamp=...",
       "filename": "文件名.pdf",
-      "type": "document",
-      "extension": ".pdf",
-      "size": 12345,
-      "mime_type": "application/pdf"
+      ...
     }
   ]
 }
@@ -130,7 +128,7 @@ POST /analyze_multiple_pdfs
 Content-Type: application/json
 
 {
-  "files": [
+  "DOC": [ // <-- 键名与app.py中的dify_input_key匹配
     { "url": "/files/...", "filename": "文件1.pdf", ... },
     { "url": "/files/...", "filename": "文件2.pdf", ... }
   ]
@@ -145,14 +143,8 @@ Content-Type: application/json
 
 {
   "pdf_list": [
-    {
-      "pdf_base64": "第一个PDF的Base64...",
-      "filename": "文件A.pdf"
-    },
-    {
-      "pdf_base64": "第二个PDF的Base64...",
-      "filename": "文件B.pdf"
-    }
+    { "pdf_base64": "...", "filename": "文件A.pdf" },
+    { "pdf_base64": "...", "filename": "文件B.pdf" }
   ]
 }
 ```
@@ -163,21 +155,13 @@ Content-Type: application/json
 {
   "analysis_output": {
     "results": {
-      "文件1.pdf": {
-        "content": "...",
-        "filename": "文件1.pdf",
-        "status": "success"
-      },
-      "文件2.pdf": {
-        "content": "...",
-        "filename": "文件2.pdf",
-        "status": "success"
-      }
+      "文件1.pdf": { ... },
+      "文件2.pdf": { ... }
     },
     "total_files_requested": 2,
     "total_files_prepared": 2,
     "processed_files": 2,
-    "status": "success", // 或 partial_success, failure
+    "status": "success", 
     "processing_time": 30.5
   }
 }
@@ -189,28 +173,21 @@ Content-Type: application/json
 GET /status
 ```
 
-返回 (结构不变, 但task_info字段可能包含更多细节):
+返回:
 
 ```json
 {
-  "is_processing": true,
-  "status": "busy",
-  "task_info": {
-    "type": "multiple_pdfs",
-    "start_time": ..., 
-    "status": "downloading_pdfs",
-    "input_source": "dify_files",
-    "total_files": 2,
-    "processed_files_download": 1, 
-    "current_file": "文件1.pdf"
-  }
+  "is_processing": false,
+  "status": "ready",
+  "task_info": null
 }
 ```
 
 ## 注意事项
 
-- API优先使用`files`输入。如果`files`不存在或无效，才会尝试`pdf_base64`/`pdf_list`。
-- 确保配置正确的`DIFY_BASE_URL`以便`files`输入能正常工作。
+- **确保`app.py`中的`dify_input_key`与你在Dify工具中定义的File变量名一致 (当前设为`'DOC'`)。**
+- API优先使用Dify变量键 (如`DOC`) 输入。如果该键不存在或无效，才会尝试`pdf_base64`/`pdf_list`。
+- 确保配置正确的`DIFY_BASE_URL`以便Dify文件输入能正常工作。
 - 服务一次只能处理一个任务，若任务正在处理中，新请求将返回429状态码。
 - 服务需要足够的磁盘空间来存储临时PDF文件。
 - 需要GPU环境以获得最佳性能。
