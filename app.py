@@ -32,33 +32,34 @@ task_lock = threading.Lock()
 # ---------------------
 
 # Helper function to download file from Dify URL
-def download_dify_file(file_info, target_dir):
-    if 'url' not in file_info or 'filename' not in file_info:
-        raise ValueError("Invalid Dify file info object, missing 'url' or 'filename'")
+def download_dify_file(file_url_rel, filename_orig, target_dir):
+    # Now receives relative URL and original filename separately
+    if not file_url_rel or not filename_orig:
+        raise ValueError("download_dify_file requires both file_url_rel and filename_orig")
 
-    filename = secure_filename(file_info['filename'])
+    filename = secure_filename(filename_orig) # Sanitize for saving
     # Ensure filename has the correct extension if missing from secure_filename result
-    original_ext = os.path.splitext(file_info['filename'].lower())[1]
+    original_ext = os.path.splitext(filename_orig.lower())[1] or '.pdf' # Default to .pdf if no ext
     if not filename.lower().endswith(original_ext):
          filename = os.path.splitext(filename)[0] + original_ext
 
-    download_url = f"{DIFY_BASE_URL.rstrip('/')}{file_info['url']}"
+    download_url = f"{DIFY_BASE_URL.rstrip('/')}{file_url_rel}"
     target_path = os.path.join(target_dir, filename)
 
     try:
         app.logger.info(f"Downloading from {download_url} to {target_path}")
-        response = requests.get(download_url, stream=True, timeout=60) # Add timeout
-        response.raise_for_status()  # Raise an exception for bad status codes
+        response = requests.get(download_url, stream=True, timeout=60)
+        response.raise_for_status()
         with open(target_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-        app.logger.info(f"Successfully downloaded {file_info['filename']}")
-        # Return the original filename for mapping, and the saved path
-        return target_path, file_info['filename']
+        app.logger.info(f"Successfully downloaded {filename_orig}")
+        # Return the saved path and the sanitized/saved filename
+        return target_path, filename
     except requests.exceptions.RequestException as e:
-        raise ConnectionError(f"Failed to download file {file_info['filename']} from Dify {download_url}: {e}")
+        raise ConnectionError(f"Failed to download file {filename_orig} from Dify {download_url}: {e}")
     except Exception as e:
-        raise IOError(f"Failed to save downloaded file {file_info['filename']}: {e}")
+        raise IOError(f"Failed to save downloaded file {filename_orig}: {e}")
 
 # Helper function to save base64 encoded file
 def save_base64_file(b64_string, filename_req, target_dir):
@@ -86,38 +87,16 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "analyze_pdf",
-            "description": "使用olmocr顺序分析一个或多个PDF文件并提取内容. 可通过Dify文件对象列表或base64列表提供.",
+            "description": "使用olmocr分析单个PDF文件. 需要提供文件URL和原始文件名.",
             "parameters": {
+                # Schema now uses GET parameters, defined in schema file
+                # This is just a placeholder now
                 "type": "object",
                 "properties": {
-                    "input_files": { # Dify input
-                        "type": "array",
-                        "description": "(推荐) Dify文件对象列表 (至少一个文件).",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "url": {"type": "string"},
-                                "filename": {"type": "string"}
-                            },
-                            "required": ["url", "filename"]
-                        },
-                        "minItems": 1
-                    },
-                     "pdf_list": { # Direct input (alternative)
-                        "type": "array",
-                        "description": "(备选) PDF文件列表, 每个包含filename和pdf_base64 (若提供'input_files'则忽略此项).",
-                        "items": {
-                             "type": "object",
-                             "properties": {
-                                 "filename": {"type": "string"},
-                                 "pdf_base64": {"type": "string", "format": "byte"}
-                             },
-                              "required": ["filename", "pdf_base64"],
-                              "minItems": 1
-                         }
-                    }
+                    "file_url": {"type": "string"},
+                    "filename": {"type": "string"}
                 },
-                # API will prioritize 'input_files' if both are present
+                "required": ["file_url", "filename"]
             }
         }
     }
@@ -125,7 +104,7 @@ TOOLS_SCHEMA = [
 
 @app.route("/tools", methods=["GET"])
 def get_tools():
-    """返回工具的schema定义"""
+    """返回工具的schema定义 (需手动更新schema文件以匹配GET参数)"""
     return jsonify(TOOLS_SCHEMA)
 
 @app.route("/status", methods=["GET"])
@@ -147,11 +126,21 @@ def get_status():
                 "task_info": None
             })
 
-# --- Main Analysis Endpoint --- 
-@app.route("/analyze_pdf", methods=["POST"])
+# --- Main Analysis Endpoint (Now GET) --- 
+@app.route("/analyze_pdf", methods=["GET"])
 def analyze_pdf():
-    """处理单个或多个PDF分析请求 (Dify文件格式或Base64列表), 顺序执行olmocr."""
+    """处理单个PDF分析请求 (通过URL和文件名参数). OLMOCR仍顺序执行."""
     global current_task
+
+    # Extract parameters from query string
+    file_url = request.args.get('file_url')
+    original_filename = request.args.get('filename')
+
+    app.logger.info(f"Received request for /analyze_pdf (GET)")
+    app.logger.debug(f"Query Parameters: file_url={file_url}, filename={original_filename}")
+
+    if not file_url or not original_filename:
+        return jsonify({"error": "缺少必需的查询参数 'file_url' 或 'filename'"}, 400)
 
     with task_lock:
         if current_task:
@@ -162,229 +151,114 @@ def analyze_pdf():
                 "task_info": task_info_safe
             }), 429
 
-        # Initialize task status
+        # Initialize task status for a single file
         current_task = {
-            "type": "sequential_pdf_analysis",
+            "type": "single_pdf_analysis_get",
             "start_time": time.time(),
-            "status": "initializing"
+            "status": "initializing",
+            "input_filename": original_filename, # Log input filename
+            "input_url": file_url
         }
 
-    # Create a main temporary directory for the whole request
+    # Create a main temporary directory for this single file task
     main_task_workspace = None 
-    files_to_process_info = [] # List of dicts: {'path': saved_path, 'original_filename': original_fname}
-    total_files_requested = 0
-    input_source = None
-    # Expecting the Dify input variable name as the top-level key
-    dify_input_key = 'input_files' 
-
     try:
-        # Log raw request body and headers for debugging
-        raw_body = request.get_data()
-        app.logger.info(f"Received request for /analyze_pdf")
-        app.logger.debug(f"Request Headers: {request.headers}")
-        try:
-            # Try decoding raw body as UTF-8 for logging, ignore errors if not decodable
-            app.logger.debug(f"Raw Request Body: {raw_body.decode('utf-8', errors='ignore')}")
-        except Exception:
-             app.logger.debug(f"Raw Request Body (bytes): {raw_body}")
-        
-        data = request.json
-        app.logger.info(f"Parsed JSON data: {json.dumps(data, indent=2) if data else 'None'}") # Pretty print JSON
-        
-        if not data:
-            raise ValueError("请求体不能为空或JSON解析失败")
-
-        # --- Stage 1: Prepare all input files (Download or Save Base64) ---
+        # --- Stage 1: Prepare the single input file --- 
         main_task_workspace = tempfile.mkdtemp(dir=WORKSPACE_DIR)
-        pdf_save_dir = os.path.join(main_task_workspace, "pdfs_to_process")
+        pdf_save_dir = os.path.join(main_task_workspace, "pdf_to_process") # Dir for one pdf
         os.makedirs(pdf_save_dir, exist_ok=True)
 
-        # Check for the top-level key Dify uses (e.g., 'input_files')
-        if dify_input_key in data:
-            # Dify passes the file info nested inside the variable object
-            # The actual file list is usually under a key named "files"
-            dify_variable_value = data[dify_input_key]
-            if isinstance(dify_variable_value, dict) and 'files' in dify_variable_value and isinstance(dify_variable_value['files'], list):
-                app.logger.info(f"Detected Dify input structure under key '{dify_input_key}'. Extracting from nested 'files' array.")
-                dify_files_info = dify_variable_value['files'] # <--- Extract the nested list
-                if not dify_files_info:
-                     raise ValueError(f"Dify variable '{dify_input_key}' contained an empty nested 'files' list.")
-                
-                input_source = f'dify_{dify_input_key}'
-                total_files_requested = len(dify_files_info)
-                with task_lock:
-                    current_task["status"] = "preparing_files"
-                    current_task["total_files_requested"] = total_files_requested
-                    current_task["files_prepared_count"] = 0
-
-                for idx, file_info in enumerate(dify_files_info):
-                    original_fname = file_info.get('filename', f'unknown_dify_{idx}.pdf')
-                    with task_lock:
-                         current_task["current_file_preparing"] = original_fname
-                    try:
-                        # Pass the file_info object directly
-                        saved_path, original_fname_used = download_dify_file(file_info, pdf_save_dir)
-                        files_to_process_info.append({'path': saved_path, 'original_filename': original_fname_used})
-                        with task_lock:
-                            current_task["files_prepared_count"] = len(files_to_process_info)
-                    except (ValueError, ConnectionError, IOError) as e:
-                         app.logger.warning(f"Skipping Dify file {original_fname} due to prepare error: {e}")
-                         continue
-            else:
-                 # Fallback or error if the structure is not as expected
-                 app.logger.warning(f"Received key '{dify_input_key}' but its value is not a dict with a 'files' list: {dify_variable_value}")
-                 # Try to see if maybe the top level value IS the list itself (less likely now)
-                 if isinstance(dify_variable_value, list) and len(dify_variable_value) >= 1:
-                     app.logger.info(f"Attempting to process value of '{dify_input_key}' as the file list directly.")
-                     dify_files_info = dify_variable_value
-                     # ... (duplicate the file processing loop here or refactor) ...
-                     # For simplicity, let's just raise error if nested 'files' not found for now
-                     raise ValueError(f"键 '{dify_input_key}' 的值不是预期的包含 'files' 列表的对象结构。")
-                 else:
-                     raise ValueError(f"键 '{dify_input_key}' 存在但其值不是包含 'files' 列表的对象结构或文件列表。")
-
-        elif 'pdf_list' in data and isinstance(data['pdf_list'], list) and len(data['pdf_list']) >= 1:
-            # Priority 2: Base64 list input
-            app.logger.info("Detected input using base64 list.")
-            pdf_list_info = data['pdf_list']
-            input_source = 'base64_list'
-            total_files_requested = len(pdf_list_info)
-            with task_lock:
-                current_task["status"] = "preparing_files"
-                current_task["total_files_requested"] = total_files_requested
-                current_task["files_prepared_count"] = 0
-
-            for idx, item in enumerate(pdf_list_info):
-                 original_fname = item.get('filename', f'unknown_base64_{idx}.pdf')
-                 if 'pdf_base64' not in item:
-                     app.logger.warning(f"Skipping item in pdf_list {original_fname} due to missing 'pdf_base64'")
-                     continue
-                 with task_lock:
-                     current_task["current_file_preparing"] = original_fname
-                 try:
-                    saved_path, original_fname_used = save_base64_file(item['pdf_base64'], original_fname, pdf_save_dir)
-                    files_to_process_info.append({'path': saved_path, 'original_filename': original_fname_used})
-                    with task_lock:
-                         current_task["files_prepared_count"] = len(files_to_process_info)
-                 except (ValueError, IOError) as e:
-                     app.logger.warning(f"Skipping base64 file {original_fname} due to prepare error: {e}")
-                     continue
-        else:
-            raise ValueError(f"无效的输入格式，需要提供 '{dify_input_key}' (其内部包含'files'列表) 或 'pdf_list'. 收到的keys: {list(data.keys())}")
-
-        if not files_to_process_info:
-             raise ValueError("没有成功准备任何文件进行处理")
-        # ---------------------------------------------
-
-        # --- Stage 2: Process prepared files sequentially --- 
-        results_by_original_file = {}
-        total_to_process = len(files_to_process_info)
-        processed_successfully_count = 0
+        with task_lock:
+            current_task["status"] = "downloading_pdf"
+            current_task["current_file_preparing"] = original_filename
+        
+        # Download the file using the provided URL and filename
+        saved_pdf_path, saved_filename = download_dify_file(file_url, original_filename, pdf_save_dir)
+        app.logger.info(f"File prepared at: {saved_pdf_path}")
 
         with task_lock:
-             current_task["input_source"] = input_source
-             current_task["total_files_to_process"] = total_to_process
-             del current_task["files_prepared_count"] # Remove preparation count
-             del current_task["current_file_preparing"]
+            # Update status after successful download/save
+            current_task["status"] = "file_prepared"
+            current_task["prepared_filepath"] = saved_pdf_path # Log path
+            del current_task["current_file_preparing"] # Clear prep state
+        # ---------------------------------------------
 
-        for idx, file_info in enumerate(files_to_process_info):
-            current_original_filename = file_info['original_filename']
-            current_pdf_path = file_info['path']
-            file_status = "failed" # Default status for this file
-            file_content = None
-            error_detail = None
+        # --- Stage 2: Process the single prepared file --- 
+        file_status = "failed" # Default status for this file
+        file_content = None
+        error_detail = None
 
-            with task_lock:
-                current_task["status"] = f"processing_file_{idx+1}_of_{total_to_process}"
-                current_task["current_file_processing"] = current_original_filename
+        with task_lock:
+            current_task["status"] = "processing_pdf"
+            current_task["current_file_processing"] = original_filename
 
-            # Create a sub-workspace for this specific olmocr run
-            single_run_workspace = tempfile.mkdtemp(dir=main_task_workspace)
-            single_run_output_path = os.path.join(single_run_workspace, "results")
-            os.makedirs(single_run_output_path, exist_ok=True)
-            # Copy the single PDF into the sub-workspace (olmocr needs it relative)
-            single_run_pdf_path = os.path.join(single_run_workspace, os.path.basename(current_pdf_path))
-            shutil.copy(current_pdf_path, single_run_pdf_path)
+        # OLMOCR processing is still sequential relative to other API calls due to the lock
+        # Use the main_task_workspace for olmocr run (it contains the pdf_save_dir)
+        olmocr_output_path = os.path.join(main_task_workspace, "results")
+        os.makedirs(olmocr_output_path, exist_ok=True)
 
-            try:
-                # Execute olmocr command for the single file in its sub-workspace
-                cmd = [
-                    "python", "-m", "olmocr.pipeline",
-                    single_run_workspace, # Use the sub-workspace
-                    "--pdfs", single_run_pdf_path, # Point to the single PDF within
-                    "--model", MODEL_PATH
-                ]
-                app.logger.info(f"Running olmocr for {current_original_filename}: {' '.join(cmd)}")
-                process = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=300) # Add timeout per file
-                app.logger.info(f"olmocr process for {current_original_filename} finished with code {process.returncode}")
-                if process.stderr:
-                     app.logger.warning(f"olmocr stderr for {current_original_filename}:\n{process.stderr}")
+        try:
+            # Execute olmocr command for the single file in the workspace
+            cmd = [
+                "python", "-m", "olmocr.pipeline",
+                main_task_workspace, # The workspace containing the pdf subdir
+                "--pdfs", saved_pdf_path, # Point directly to the saved PDF
+                "--model", MODEL_PATH
+            ]
+            app.logger.info(f"Running olmocr for {original_filename}: {' '.join(cmd)}")
+            process = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=300) # Add timeout
+            app.logger.info(f"olmocr process for {original_filename} finished with code {process.returncode}")
+            if process.stderr:
+                app.logger.warning(f"olmocr stderr for {original_filename}:\n{process.stderr}")
 
-                if process.returncode != 0:
-                    raise RuntimeError(f"olmocr处理失败 (Code: {process.returncode}): {process.stderr}")
+            if process.returncode != 0:
+                raise RuntimeError(f"olmocr处理失败 (Code: {process.returncode}): {process.stderr}")
 
-                # Find the result file in the sub-workspace
-                result_files = glob.glob(os.path.join(single_run_output_path, "output_*.jsonl"))
-                if not result_files:
-                    raise FileNotFoundError("未找到olmocr结果文件")
+            # Find the result file in the workspace result dir
+            result_files = glob.glob(os.path.join(olmocr_output_path, "output_*.jsonl"))
+            if not result_files:
+                raise FileNotFoundError("未找到olmocr结果文件")
 
-                # Read result content
-                with open(result_files[0], 'r', encoding='utf-8') as f:
-                    result_content = f.read().strip()
+            # Read result content
+            with open(result_files[0], 'r', encoding='utf-8') as f:
+                result_content = f.read().strip()
 
-                # Parse results
-                file_results_parsed = []
-                for line in result_content.split('\n'):
-                    if line.strip():
-                        file_results_parsed.append(json.loads(line))
+            # Parse results
+            file_results_parsed = []
+            for line in result_content.split('\n'):
+                if line.strip():
+                    file_results_parsed.append(json.loads(line))
 
-                # Extract text
-                extracted_text = ""
-                if file_results_parsed:
-                    for res in file_results_parsed:
-                        if 'text' in res:
-                            extracted_text += res['text'] + "\n\n"
+            # Extract text
+            extracted_text = ""
+            if file_results_parsed:
+                for res in file_results_parsed:
+                    if 'text' in res:
+                        extracted_text += res['text'] + "\n\n"
 
-                file_content = extracted_text.strip()
-                file_status = "success"
-                processed_successfully_count += 1
+            file_content = extracted_text.strip()
+            file_status = "success"
 
-            except (FileNotFoundError, RuntimeError, subprocess.TimeoutExpired) as e:
-                error_detail = f"处理文件 '{current_original_filename}' 时出错: {e}"
-                app.logger.error(error_detail)
-            except Exception as e:
-                error_detail = f"处理文件 '{current_original_filename}' 时发生意外错误: {e}"
-                app.logger.error(error_detail, exc_info=True)
-            finally:
-                # Store result (or error) for this file
-                results_by_original_file[current_original_filename] = {
-                    "content": file_content,
-                    "filename": current_original_filename,
-                    "status": file_status,
-                    "error": error_detail # Will be None on success
-                }
-                # Clean up the sub-workspace for this run
-                shutil.rmtree(single_run_workspace, ignore_errors=True)
+        except (FileNotFoundError, RuntimeError, subprocess.TimeoutExpired) as e:
+            error_detail = f"处理文件 '{original_filename}' 时出错: {e}"
+            app.logger.error(error_detail)
+        except Exception as e:
+            error_detail = f"处理文件 '{original_filename}' 时发生意外错误: {e}"
+            app.logger.error(error_detail, exc_info=True)
         # ---------------------------------------------
 
         # --- Stage 3: Prepare final response --- 
-        final_status = "failure"
-        if processed_successfully_count == total_to_process:
-            final_status = "success"
-        elif processed_successfully_count > 0:
-             final_status = "partial_success"
-
         analysis_result = {
-            "results": results_by_original_file,
-            "total_files_requested": total_files_requested,
-            "total_files_prepared": len(files_to_process_info),
-            "processed_successfully": processed_successfully_count,
-            "status": final_status,
+            # Use original filename provided in request
+            "filename": original_filename,
+            "content": file_content,
+            "status": file_status,
+            "error": error_detail, # Will be None on success
             "processing_time": time.time() - current_task["start_time"]
         }
         response_data = {"analysis_output": analysis_result}
 
-        # Clean up the main task workspace (incl. downloaded pdfs)
+        # Clean up the main task workspace
         shutil.rmtree(main_task_workspace, ignore_errors=True)
         main_task_workspace = None
 
@@ -395,7 +269,7 @@ def analyze_pdf():
         return jsonify(response_data)
 
     except (ValueError, ConnectionError, IOError) as e: # Errors during initial file prep
-        err_msg = f"文件准备错误: {e}"
+        err_msg = f"文件准备错误 (url={file_url}, filename={original_filename}): {e}"
         app.logger.error(err_msg)
         with task_lock:
             current_task = None

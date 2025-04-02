@@ -2,13 +2,14 @@
 
 这是一个将olmocr与Dify平台集成的适配器，使用Flask提供符合OpenAPI标准格式的工具API。
 
+**重要：此版本假设Dify工作流通过Jinja2模板传入文件URL和文件名作为查询参数。**
+
 ## 功能
 
-- 提供符合OpenAPI schema格式的API接口
-- **统一使用 `/analyze_pdf` 端点处理单个或多个文件**
-- 接收Dify的文件对象输入 (固定键名为`input_files`) 或 Base64编码文件输入 (Base64为备选)
-- **顺序处理** 多个文件 (一次处理一个文件，非并行)
-- 将PDF文件转换为文本内容并返回结果 (结果嵌套在 `analysis_output` 键下，包含每个文件的状态)
+- 提供符合OpenAPI schema格式的API接口 (`GET /analyze_pdf`)
+- 通过URL下载Dify文件，并使用传入的文件名进行处理
+- 将PDF文件转换为文本内容并返回结果 (结果嵌套在 `analysis_output` 键下)
+- 一次API调用处理一个文件 (需要在Dify中自行实现迭代)
 - 可以作为Dify平台的工具调用
 - 支持任务状态检查，避免并发处理多个任务
 - 支持配置自定义模型路径和Dify基础URL
@@ -36,7 +37,6 @@ pip install -r requirements.txt
 
 - `MODEL_PATH`: olmocr模型的本地路径 (默认: `/mnt/model_Q4/olmocr`)
 - `DIFY_BASE_URL`: 你的Dify服务的基础URL，用于下载文件 (默认: `http://localhost:3000`)
-- **Dify输入键名**: 在`app.py`中，文件输入的固定键名被设置为`input_files`。请确保在Dify工具配置中也使用此名称。
 
 ## 使用方法
 
@@ -60,12 +60,14 @@ gunicorn -w 1 -b 0.0.0.0:5555 app:app
 
 在Dify平台上，添加一个新的工具，配置如下:
 
-- API URL: `http://your-adapter-server:5555/analyze_pdf` (**使用这个统一端点**)
-- 使用tools接口获取schema: `http://your-adapter-server:5555/tools` (此Schema现在只包含 `/analyze_pdf`)
+- API URL: `http://your-adapter-server:5555/analyze_pdf`
+- 使用tools接口获取schema: `http://your-adapter-server:5555/tools` (此Schema现在只包含 `/analyze_pdf` 且使用GET参数)
 - **在工具参数中:**
-    - **定义一个`File`类型的变量，并将其命名为 `input_files`**。这是必需的，以便Dify将文件信息放入正确的JSON键中。
-    - **配置该变量允许上传多个文件 (设置为列表/数组类型)。**
-    - 如果希望也能通过Base64传递，可以在Dify的工具描述中说明接受`pdf_list`。
+    - Dify会根据Schema自动生成两个**字符串类型**的输入变量：`file_url` 和 `filename`。
+    - **使用Jinja2模板**将您的上下文文件变量（假设名为`DOC`）拆分，并将URL和文件名分别赋值给这两个输入变量：
+        - `file_url` 输入框: `{{ DOC.files[0].url }}` (假设只处理第一个文件)
+        - `filename` 输入框: `{{ DOC.files[0].filename }}` (假设只处理第一个文件)
+    - **如果需要处理多个文件，您需要在Dify工作流中构建循环或迭代逻辑，每次调用工具只处理一个文件。**
 
 ## API接口
 
@@ -75,66 +77,30 @@ gunicorn -w 1 -b 0.0.0.0:5555 app:app
 GET /tools
 ```
 
-返回符合OpenAPI格式的工具schema定义 (现在只包含 `/analyze_pdf` 端点)。
+返回符合OpenAPI格式的工具schema定义 (现在只包含 `GET /analyze_pdf` 端点)。
 
-### 分析一个或多个PDF文件
-
-**方式一: 使用Dify文件对象 (推荐)**
+### 分析单个PDF文件 (通过GET请求)
 
 ```
-POST /analyze_pdf
-Content-Type: application/json
-
-// 处理单个文件
-{
-  "input_files": [
-    { "url": "/files/...", "filename": "文件名.pdf", ... }
-  ]
-}
-
-// 处理多个文件
-{
-  "input_files": [
-    { "url": "/files/...", "filename": "文件1.pdf", ... },
-    { "url": "/files/...", "filename": "文件2.pdf", ... }
-  ]
-}
+GET /analyze_pdf?file_url=<URL编码后的相对路径>&filename=<URL编码后的文件名>
 ```
 
-**方式二: 使用Base64对象列表**
+**示例调用 (由Dify通过Jinja2模板生成):**
 
 ```
-POST /analyze_pdf
-Content-Type: application/json
-
-{
-  "pdf_list": [
-    { "pdf_base64": "...", "filename": "文件A.pdf" },
-    { "pdf_base64": "...", "filename": "文件B.pdf" }
-  ]
-}
+GET http://your-adapter-server:5555/analyze_pdf?file_url=%2Ffiles%2Fa7ab9415-caea-4f26-bd1d-efd8cefbadd5%2Ffile-preview%3Ftimestamp%3D...%26nonce%3D...%26sign%3D...&filename=1.%E8%AF%81%E6%8D%AE%E6%9D%90%E6%96%99%E5%8D%B7%EF%BC%88%E7%AC%AC%E4%B8%80%E5%86%8C%EF%BC%89%EF%BC%88%E5%85%AC%E5%AE%89%E5%8D%B7%EF%BC%89_可搜索.pdf
 ```
 
-返回 (所有情况均返回此结构):
+返回:
 
 ```json
 {
   "analysis_output": {
-    "results": {
-      "文件名.pdf": {
-        "content": "...",
-        "filename": "文件名.pdf",
-        "status": "success", // 或 "failed"
-        "error": null // 或 错误信息字符串
-      },
-      "文件1.pdf": { ... },
-      "文件2.pdf": { ... }
-    },
-    "total_files_requested": 2,
-    "total_files_prepared": 2,
-    "processed_successfully": 2,
-    "status": "success", // 或 partial_success, failure
-    "processing_time": 45.8
+    "filename": "1.证据材料卷（第一册）（公安卷）_可搜索.pdf", // 传入的文件名
+    "content": "从PDF中提取的文本内容",
+    "status": "success", // 或 "failed"
+    "error": null, // 或 错误信息字符串
+    "processing_time": 15.2
   }
 }
 ```
@@ -161,24 +127,22 @@ GET /status
   "is_processing": true,
   "status": "busy",
   "task_info": {
-      "type": "sequential_pdf_analysis",
+      "type": "single_pdf_analysis_get",
       "start_time": ..., 
-      "status": "processing_file_2_of_3", // 任务状态更详细
-      "input_source": "dify_input_files",
-      "total_files_requested": 3, 
-      "total_files_to_process": 3, 
-      "current_file_processing": "报告B.pdf" 
+      "status": "processing_pdf",
+      "input_filename": "1.证据材料卷（第一册）（公安卷）_可搜索.pdf",
+      "input_url": "/files/..."
     }
 }
 ```
 
 ## 注意事项
 
-- **API端点已合并为 `/analyze_pdf`**。
-- **确保在Dify工具配置中，文件输入变量的名称是 `input_files` 并允许列表/数组。**
-- API优先使用`input_files`键输入。如果该键不存在或无效，才会尝试`pdf_list`。
-- 确保配置正确的`DIFY_BASE_URL`以便`input_files`输入能正常工作。
-- 服务一次只能处理一个任务 (顺序处理文件)，若任务正在处理中，新请求将返回429状态码。
+- **API端点已改为 `GET /analyze_pdf`，并通过查询参数接收`file_url`和`filename`。**
+- **您必须在Dify工作流中使用Jinja2模板从文件变量中提取URL和文件名，并分别传入对应的输入参数。**
+- **此API现在一次只处理一个文件。处理多个文件需要在Dify中实现循环调用。**
+- 确保配置正确的`DIFY_BASE_URL`。
+- 服务一次只能处理一个任务，若任务正在处理中，新请求将返回429状态码。
 - 服务需要足够的磁盘空间来存储临时PDF文件。
 - 需要GPU环境以获得最佳性能。
-- 大型PDF文件可能需要较长处理时间 
+- 大型PDF文件可能需要较长处理时间。 
