@@ -11,20 +11,28 @@ import threading
 import glob
 import requests # Import requests library
 import logging
+import sys
 
 app = Flask(__name__)
 
 # --- Logging Setup ---
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-# You might want to redirect Flask's default logger to use your config
-# Or configure Flask's logger directly:
-app.logger.setLevel(logging.INFO) # Or DEBUG for more verbosity
-handler = logging.StreamHandler() # Log to stderr
+# Force removal of existing handlers to ensure ours takes precedence
+for handler in app.logger.handlers[:]:
+    app.logger.removeHandler(handler)
+
+# Add our StreamHandler
+handler = logging.StreamHandler(sys.stderr) # Explicitly use stderr
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
-if not app.logger.handlers: # Avoid adding duplicate handlers
-    app.logger.addHandler(handler)
+app.logger.addHandler(handler)
+
+# Set a default level (will be overridden by LOG_LEVEL env var later in __main__)
+app.logger.setLevel(logging.INFO)
+# We also need to set the handler level initially, although it will be reset in __main__
+handler.setLevel(logging.INFO)
+
+# Prevent messages from propagating to the root logger
+app.logger.propagate = False
 # --------------------
 
 # --- Configuration ---
@@ -450,19 +458,23 @@ if __name__ == '__main__':
     # Set log level from environment variable, default to INFO
     log_level_name = os.environ.get('LOG_LEVEL', 'INFO').upper()
     log_level = getattr(logging, log_level_name, logging.INFO)
+
+    # Set the level for the logger AND its handlers
     app.logger.setLevel(log_level)
-    # Ensure the handler also respects the level
-    for h in app.logger.handlers:
+    for h in app.logger.handlers: # Should only be our handler now
         h.setLevel(log_level)
-    app.logger.info(f"Starting Flask server with log level {log_level_name}")
 
     # Check environment variable to enable debug mode
     debug_mode_env = os.environ.get('FLASK_DEBUG_MODE', '0').lower()
     debug_enabled = debug_mode_env in ['1', 'true', 'yes', 'on']
 
-    app.logger.info(f"Debug mode {'ENABLED' if debug_enabled else 'DISABLED'} (FLASK_DEBUG_MODE='{debug_mode_env}')")
+    # Log initial settings *before* app.run
+    # Use level=logging.INFO explicitly here in case the logger level was set higher
+    app.logger.log(logging.INFO, f"Attempting to set log level to: {logging.getLevelName(log_level)} (LOG_LEVEL='{log_level_name}')")
+    app.logger.log(logging.INFO, f"Debug mode setting: {'ENABLED' if debug_enabled else 'DISABLED'} (FLASK_DEBUG_MODE='{debug_mode_env}')")
+    # Log the final effective level of the logger itself
+    app.logger.log(logging.INFO, f"Effective logger level set to: {logging.getLevelName(app.logger.getEffectiveLevel())}")
 
     # Run the Flask app
-    # Note: When debug=True, Flask typically uses its own reloader which might interfere
-    # with manual logging setup slightly, but basic functionality should remain.
-    app.run(host='0.0.0.0', port=5001, debug=debug_enabled) 
+    # Flask might adjust logging when debug=True
+    app.run(host='0.0.0.0', port=5555, debug=debug_enabled) 
