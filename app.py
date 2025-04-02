@@ -455,4 +455,14 @@ if __name__ == '__main__':
     for h in app.logger.handlers:
         h.setLevel(log_level)
     app.logger.info(f"Starting Flask server with log level {log_level_name}")
-    app.run(host='0.0.0.0', port=5001, debug=False) # debug=False for production/testing logging 
+
+    # Check environment variable to enable debug mode
+    debug_mode_env = os.environ.get('FLASK_DEBUG_MODE', '0').lower()
+    debug_enabled = debug_mode_env in ['1', 'true', 'yes', 'on']
+
+    app.logger.info(f"Debug mode {'ENABLED' if debug_enabled else 'DISABLED'} (FLASK_DEBUG_MODE='{debug_mode_env}')")
+
+    # Run the Flask app
+    # Note: When debug=True, Flask typically uses its own reloader which might interfere
+    # with manual logging setup slightly, but basic functionality should remain.
+    app.run(host='0.0.0.0', port=5001, debug=debug_enabled) 
