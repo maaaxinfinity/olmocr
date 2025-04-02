@@ -178,9 +178,21 @@ def analyze_pdf():
     dify_input_key = 'input_files' 
 
     try:
+        # Log raw request body and headers for debugging
+        raw_body = request.get_data()
+        app.logger.info(f"Received request for /analyze_pdf")
+        app.logger.debug(f"Request Headers: {request.headers}")
+        try:
+            # Try decoding raw body as UTF-8 for logging, ignore errors if not decodable
+            app.logger.debug(f"Raw Request Body: {raw_body.decode('utf-8', errors='ignore')}")
+        except Exception:
+             app.logger.debug(f"Raw Request Body (bytes): {raw_body}")
+        
         data = request.json
+        app.logger.info(f"Parsed JSON data: {json.dumps(data, indent=2) if data else 'None'}") # Pretty print JSON
+        
         if not data:
-            raise ValueError("请求体不能为空")
+            raise ValueError("请求体不能为空或JSON解析失败")
 
         # --- Stage 1: Prepare all input files (Download or Save Base64) ---
         main_task_workspace = tempfile.mkdtemp(dir=WORKSPACE_DIR)
