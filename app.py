@@ -303,19 +303,24 @@ def analyze_pdf():
 
         return jsonify(response_data)
 
-    except (ValueError, ConnectionError, IOError) as e:
+    except (ValueError, ConnectionError, IOError, FileNotFoundError, RuntimeError) as e:
+        err_msg = f"文件处理错误: {e}"
+        app.logger.error(err_msg)
         with task_lock:
             current_task = None
-        if 'task_workspace' in locals() and os.path.exists(task_workspace):
+        # Check if task_workspace was assigned before trying to clean up
+        if task_workspace and os.path.exists(task_workspace):
              shutil.rmtree(task_workspace, ignore_errors=True)
-        return jsonify({"error": f"文件处理错误: {e}"}), 400
+        return jsonify({"error": err_msg}), 400
     except Exception as e:
+        err_msg = f"服务器内部错误: {e}"
+        app.logger.error(err_msg, exc_info=True)
         with task_lock:
             current_task = None
-        if 'task_workspace' in locals() and os.path.exists(task_workspace):
+        # Check if task_workspace was assigned before trying to clean up
+        if task_workspace and os.path.exists(task_workspace):
              shutil.rmtree(task_workspace, ignore_errors=True)
-        app.logger.error(f"Unexpected error in analyze_pdf: {e}", exc_info=True)
-        return jsonify({"error": f"服务器内部错误: {e}"}), 500
+        return jsonify({"error": err_msg}), 500
 
 @app.route("/analyze_multiple_pdfs", methods=["POST"])
 def analyze_multiple_pdfs():
@@ -469,13 +474,24 @@ def analyze_multiple_pdfs():
 
         return jsonify(response_data)
 
-    except Exception as e:
+    except (ValueError, ConnectionError, IOError, FileNotFoundError, RuntimeError) as e:
+        err_msg = f"批量文件处理错误: {e}"
+        app.logger.error(err_msg)
         with task_lock:
             current_task = None
-        if 'task_workspace' in locals() and os.path.exists(task_workspace):
+        # Check if task_workspace was assigned before trying to clean up
+        if task_workspace and os.path.exists(task_workspace):
              shutil.rmtree(task_workspace, ignore_errors=True)
-        app.logger.error(f"Unexpected error in analyze_multiple_pdfs: {e}", exc_info=True)
-        return jsonify({"error": f"服务器内部错误: {e}"}), 500
+        return jsonify({"error": err_msg}), 400
+    except Exception as e:
+        err_msg = f"服务器内部错误: {e}"
+        app.logger.error(err_msg, exc_info=True)
+        with task_lock:
+            current_task = None
+        # Check if task_workspace was assigned before trying to clean up
+        if task_workspace and os.path.exists(task_workspace):
+             shutil.rmtree(task_workspace, ignore_errors=True)
+        return jsonify({"error": err_msg}), 500
 
 @app.route("/results/<path:filename>", methods=["GET"])
 def get_result_file(filename):
