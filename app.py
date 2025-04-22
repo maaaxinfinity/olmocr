@@ -228,7 +228,7 @@ def run_olmocr_on_pdf(pdf_file_obj, target_dim, anchor_len, error_rate, workers)
 # --- Gradio Interface ---
 with gr.Blocks(theme=gr.themes.Default(primary_hue="blue", secondary_hue="cyan")) as demo:
     gr.Markdown("# OLMOCR PDF 分析工具")
-    gr.Markdown("上传 PDF 文件，调整参数（可选），然后点击"开始分析"。")
+    gr.Markdown('上传 PDF 文件，调整参数（可选），然后点击"开始分析"。')
 
     with gr.Row():
         with gr.Column(scale=1):
