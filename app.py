@@ -293,8 +293,7 @@ def run_olmocr_on_pdf(pdf_file_list, target_dim, anchor_len, error_rate, max_con
                             logger.error(f"[{current_file_name}] Failed to read final HTML file {final_html_path_persistent}: {read_err}")
                             # Keep previous preview if read fails
                     else:
-                        logs += f"警告：[{current_file_name}] 在目标目录 {PROCESSED_PREVIEW_DIR} 中最终未找到或选中任何 HTML 预览文件。
-"
+                        logs += f"警告：[{current_file_name}] 在目标目录 {PROCESSED_PREVIEW_DIR} 中最终未找到或选中任何 HTML 预览文件。\n"
                         # Keep the previous last_successful_html
                 else:
                     logs += f"警告：[{current_file_name}] 生成 HTML 预览失败。返回码: {viewer_process.returncode}\n"
