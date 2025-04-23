@@ -55,10 +55,10 @@ def run_olmocr_on_pdf(pdf_file_obj, target_dim, anchor_len, error_rate, max_cont
 
         olmocr_results_dir = os.path.join(run_dir, "results")
 
-        # 3. Construct OLMOCR Command
+        # 3. Construct OLMOCR Command with User Parameters
         cmd = [
             "python", "-m", "olmocr.pipeline",
-            olmocr_results_dir,
+            run_dir, # <--- 正确：传递临时运行目录作为工作区
             "--pdfs", input_pdf_path,
             "--target_longest_image_dim", str(target_dim),
             "--target_anchor_text_len", str(anchor_len),
