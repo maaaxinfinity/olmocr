@@ -9,6 +9,14 @@ import time
 import logging
 import html # For escaping HTML content for srcdoc
 import zipfile # For creating zip archives
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    GPU_MONITORING_AVAILABLE = True
+except Exception as e:
+    GPU_MONITORING_AVAILABLE = False
+    gpu_error_message = f"无法初始化 NVML 进行 GPU 监控: {e}. 请确保已安装 NVIDIA 驱动和 pynvml 库。"
+    print(f"WARN: {gpu_error_message}") # Print warning on startup
 
 # --- Configuration ---
 GRADIO_WORKSPACE_DIR = "gradio_workspace"
@@ -29,18 +37,52 @@ logging.basicConfig(level=logging.INFO, format=log_format)
 logger = logging.getLogger(__name__)
 # --------------------
 
+# <<< --- GPU Stats Function --- >>>
+def get_gpu_stats():
+    """获取 GPU 使用率和显存信息"""
+    if not GPU_MONITORING_AVAILABLE:
+        return gpu_error_message # Return the stored error message
+
+    try:
+        # Assuming a single GPU system for simplicity (device index 0)
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        # Utilization rates (GPU and Memory I/O)
+        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+        gpu_util = f"{util.gpu}%"
+        mem_util = f"{util.memory}%" # Memory Controller Util
+
+        # Memory info
+        mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        mem_used_gb = f"{mem_info.used / (1024**3):.2f} GB"
+        mem_total_gb = f"{mem_info.total / (1024**3):.2f} GB"
+        mem_percent = f"{mem_info.used * 100 / mem_info.total:.1f}%"
+
+        stats_str = (
+            f"GPU 使用率: {gpu_util}\n"
+            f"显存使用率 (控制器): {mem_util}\n"
+            f"已用显存: {mem_used_gb} / {mem_total_gb} ({mem_percent})"
+        )
+        return stats_str
+    except pynvml.NVMLError as error:
+        logger.error(f"获取 GPU 状态失败: {error}")
+        return f"获取 GPU 状态失败: {error}"
+    except Exception as e:
+        logger.error(f"获取 GPU 状态时发生意外错误: {e}")
+        return f"获取 GPU 状态时出错: {e}"
+# ----------------------------
+
 def run_olmocr_on_pdf(pdf_file_list, target_dim, anchor_len, error_rate, max_context, max_retries, workers):
     """
     Runs OLMOCR sequentially on a list of uploaded PDF files, yielding status updates.
     """
     if not pdf_file_list: # Check if list is empty or None
-        yield "", "错误：请先上传至少一个 PDF 文件。", "", [], "**无文件处理**"
+        yield "", "错误：请先上传至少一个 PDF 文件。", "", [], "### 无文件处理"
         return
 
     all_extracted_text = ""
     logs = "开始处理批次...\n"
     last_successful_html = "<p>无可用预览</p>"
-    current_file_status_md = "**准备开始...**"
+    current_file_status_md = "### 准备开始..."
 
     # Initial yield to clear previous state and show starting status
     yield "", logs, last_successful_html, list_processed_files(), current_file_status_md
@@ -54,7 +96,7 @@ def run_olmocr_on_pdf(pdf_file_list, target_dim, anchor_len, error_rate, max_con
         persistent_pdf_path = None
         persistent_jsonl_path = None
         current_file_name = os.path.basename(pdf_file_obj.name)
-        current_file_status_md = f"**处理中 ({i+1}/{total_files}):** {current_file_name}"
+        current_file_status_md = f"### 处理中 ({i+1}/{total_files}):\n{current_file_name}"
         logs += f"\n===== 开始处理文件 {i+1}/{total_files}: {current_file_name} =====\n"
 
         # Yield status update before starting the file processing
@@ -136,40 +178,62 @@ def run_olmocr_on_pdf(pdf_file_list, target_dim, anchor_len, error_rate, max_con
             yield all_extracted_text, logs, last_successful_html, list_processed_files(), current_file_status_md
 
             # 6. Generate HTML Preview
-            viewer_cmd = ["python", "-m", "olmocr.viewer.dolmaviewer", persistent_jsonl_path]
-            logs += f"执行预览生成命令 [{current_file_name}] (工作目录: {GRADIO_WORKSPACE_DIR}): {' '.join(viewer_cmd)}\n"
-            viewer_process = subprocess.run(viewer_cmd, capture_output=True, text=True, check=False, cwd=GRADIO_WORKSPACE_DIR)
-            logs += f"--- Viewer STDOUT [{current_file_name}] ---\n{viewer_process.stdout}\n--- Viewer STDERR ---\n{viewer_process.stderr}\n"
-
-            if viewer_process.returncode == 0:
-                html_preview_dir_viewer = os.path.join(GRADIO_WORKSPACE_DIR, "dolma_previews")
-                base_persistent_jsonl_name = os.path.splitext(os.path.basename(persistent_jsonl_path))[0]
-                viewer_html_files = glob.glob(os.path.join(html_preview_dir_viewer, f"{base_persistent_jsonl_name}*.html")) or glob.glob(os.path.join(html_preview_dir_viewer, "*.html"))
-
-                if viewer_html_files:
-                    viewer_html_path_in_cwd = viewer_html_files[0]
-                    persistent_html_filename = f"{safe_base_name}_preview.html"
-                    final_html_path_persistent = os.path.join(PROCESSED_PREVIEW_DIR, persistent_html_filename)
-                    shutil.move(viewer_html_path_in_cwd, final_html_path_persistent)
-                    logs += f"预览文件已保存到: {final_html_path_persistent}\n"
-                    if os.path.exists(html_preview_dir_viewer):
-                        try: os.rmdir(html_preview_dir_viewer)
-                        except OSError: pass
-
-                    # Load content for immediate display
-                    with open(final_html_path_persistent, 'r', encoding='utf-8') as f: html_content = f.read()
-                    last_successful_html = f"<iframe srcdoc='{html.escape(html_content)}' width='100%' height='800px' style='border: 1px solid #ccc;'></iframe>"
-                    logs += f"[{current_file_name}] HTML 预览内容已加载。\n"
+            # <<< --- START: Add check/wait for JSONL file --- >>>
+            max_wait_time = 10 # Maximum seconds to wait for the JSONL file
+            wait_interval = 0.5 # Seconds between checks
+            start_wait_time = time.time()
+            jsonl_ready = False
+            while time.time() - start_wait_time < max_wait_time:
+                if os.path.exists(persistent_jsonl_path) and os.path.getsize(persistent_jsonl_path) > 0: # Check existence and non-empty
+                    logs += f"确认 JSONL 文件存在: {persistent_jsonl_path}\n"
+                    logger.info(f"[{current_file_name}] Confirmed JSONL file exists: {persistent_jsonl_path}")
+                    jsonl_ready = True
+                    break
                 else:
-                    logs += f"警告：[{current_file_name}] 未找到生成的 HTML 预览文件。\n"
-                    # Keep the previous last_successful_html
+                    logs += f"等待 JSONL 文件 ({persistent_jsonl_path}) 可用...\n"
+                    logger.debug(f"[{current_file_name}] Waiting for JSONL file: {persistent_jsonl_path}")
+                    time.sleep(wait_interval)
+
+            if not jsonl_ready:
+                logs += f"**错误**：等待 JSONL 文件 {persistent_jsonl_path} 超时 ({max_wait_time}秒)。跳过 HTML 预览生成。\n"
+                logger.error(f"[{current_file_name}] Timeout waiting for JSONL file: {persistent_jsonl_path}. Skipping viewer.")
+                # Keep processing the rest, just skip HTML for this file
             else:
-                logs += f"警告：[{current_file_name}] 生成 HTML 预览失败。返回码: {viewer_process.returncode}\n"
-                # Keep the previous last_successful_html
+                 # JSONL file exists, proceed with viewer command
+                viewer_cmd = ["python", "-m", "olmocr.viewer.dolmaviewer", persistent_jsonl_path]
+                logs += f"执行预览生成命令 [{current_file_name}] (工作目录: {GRADIO_WORKSPACE_DIR}): {' '.join(viewer_cmd)}\n"
+                viewer_process = subprocess.run(viewer_cmd, capture_output=True, text=True, check=False, cwd=GRADIO_WORKSPACE_DIR)
+                logs += f"--- Viewer STDOUT [{current_file_name}] ---\n{viewer_process.stdout}\n--- Viewer STDERR ---\n{viewer_process.stderr}\n"
+
+                if viewer_process.returncode == 0:
+                    html_preview_dir_viewer = os.path.join(GRADIO_WORKSPACE_DIR, "dolma_previews")
+                    base_persistent_jsonl_name = os.path.splitext(os.path.basename(persistent_jsonl_path))[0]
+                    viewer_html_files = glob.glob(os.path.join(html_preview_dir_viewer, f"{base_persistent_jsonl_name}*.html")) or glob.glob(os.path.join(html_preview_dir_viewer, "*.html"))
+
+                    if viewer_html_files:
+                        viewer_html_path_in_cwd = viewer_html_files[0]
+                        persistent_html_filename = f"{safe_base_name}_preview.html"
+                        final_html_path_persistent = os.path.join(PROCESSED_PREVIEW_DIR, persistent_html_filename)
+                        shutil.move(viewer_html_path_in_cwd, final_html_path_persistent)
+                        logs += f"预览文件已保存到: {final_html_path_persistent}\n"
+                        if os.path.exists(html_preview_dir_viewer):
+                            try: os.rmdir(html_preview_dir_viewer)
+                            except OSError: pass
+
+                        # Load content for immediate display
+                        with open(final_html_path_persistent, 'r', encoding='utf-8') as f: html_content = f.read()
+                        last_successful_html = f"<iframe srcdoc='{html.escape(html_content)}' width='100%' height='800px' style='border: 1px solid #ccc;'></iframe>"
+                        logs += f"[{current_file_name}] HTML 预览内容已加载。\n"
+                    else:
+                        logs += f"警告：[{current_file_name}] 未找到生成的 HTML 预览文件。\n"
+                        # Keep the previous last_successful_html
+                else:
+                    logs += f"警告：[{current_file_name}] 生成 HTML 预览失败。返回码: {viewer_process.returncode}\n"
+                    # Keep the previous last_successful_html
 
             # Update status for successful file
             processed_files_count += 1
-            current_file_status_md = f"**已完成 ({i+1}/{total_files}):** {current_file_name}"
+            current_file_status_md = f"### ✓ 已完成 ({i+1}/{total_files}):\n{current_file_name}"
             # Yield final state for this successful file (including updated file list)
             yield all_extracted_text, logs, last_successful_html, list_processed_files(), current_file_status_md
 
@@ -178,7 +242,7 @@ def run_olmocr_on_pdf(pdf_file_list, target_dim, anchor_len, error_rate, max_con
             error_message = f"\n**处理文件 {current_file_name} 时发生错误:** {e}\n"
             logs += error_message
             logger.exception(f"Error processing file {current_file_name}")
-            current_file_status_md = f"**失败 ({i+1}/{total_files}):** {current_file_name} - 跳过"
+            current_file_status_md = f"### ✗ 失败 ({i+1}/{total_files}):\n{current_file_name} - 跳过"
             # Yield error status, keep previous successful outputs
             yield all_extracted_text, logs, last_successful_html, list_processed_files(), current_file_status_md
             continue # Move to the next file
@@ -194,9 +258,9 @@ def run_olmocr_on_pdf(pdf_file_list, target_dim, anchor_len, error_rate, max_con
                     logs += f"警告：无法删除临时运行目录 {run_dir}: {e}\n"
 
     # Final status update after the loop finishes
-    final_status_message = f"**批处理完成。成功: {processed_files_count}, 失败: {failed_files_count} / 总计: {total_files}**"
+    final_status_message = f"### **批处理完成**\n成功: {processed_files_count}, 失败: {failed_files_count} / 总计: {total_files}"
     logs += f"\n===== {final_status_message} =====\n"
-    logger.info(final_status_message)
+    logger.info(final_status_message.replace("### ","").replace("\n"," | ")) # Log concisely
     yield all_extracted_text.strip(), logs, last_successful_html, list_processed_files(), final_status_message
 
 def clear_temp_workspace():
@@ -446,13 +510,17 @@ with gr.Blocks(theme=gr.themes.Default(primary_hue="blue", secondary_hue="cyan")
             analyze_button = gr.Button("开始分析", variant="primary")
 
             gr.Markdown("---")
-            file_status_output = gr.Markdown(label="处理进度")
+            file_status_output = gr.Markdown(label="处理进度", value="**等待任务**")
+
+            gr.Markdown("---")
+            gr.Markdown("### GPU 监控")
+            gpu_stats_output = gr.Textbox(label="GPU 状态", lines=3, interactive=False)
 
             gr.Markdown("---")
             with gr.Accordion("缓存管理", open=False):
                 clear_temp_button = gr.Button("清理临时运行目录", variant="secondary")
                 clear_processed_button = gr.Button("清理所有已处理文件", variant="stop")
-                clear_status_output = gr.Textbox(label="清理状态", interactive=False, lines=3) # Renamed output
+                clear_status_output = gr.Textbox(label="清理状态", interactive=False, lines=3)
 
 
         with gr.Column(scale=3):
@@ -463,7 +531,7 @@ with gr.Blocks(theme=gr.themes.Default(primary_hue="blue", secondary_hue="cyan")
                     html_output = gr.HTML(label="预览 (HTML)")
                 with gr.TabItem("处理日志 (聚合)"):
                     log_output = gr.Textbox(label="所有文件的日志和状态", lines=30, interactive=False)
-                with gr.TabItem("已处理文件列表与导出"): # Updated Tab Name
+                with gr.TabItem("已处理文件列表与导出"):
                     refresh_files_button = gr.Button("刷新列表")
                     processed_files_output = gr.Files(label="已保存的预览文件 (HTML)", file_count="multiple", type="filepath")
                     gr.Markdown("### 导出选项")
@@ -485,13 +553,13 @@ with gr.Blocks(theme=gr.themes.Default(primary_hue="blue", secondary_hue="cyan")
     clear_temp_button.click(
         fn=clear_temp_workspace,
         inputs=[],
-        outputs=[clear_status_output] # Use renamed output
+        outputs=[clear_status_output]
     )
 
     clear_processed_button.click(
         fn=clear_all_processed_data,
         inputs=[],
-        outputs=[clear_status_output, processed_files_output, file_status_output] # Clear status too
+        outputs=[clear_status_output, processed_files_output, file_status_output]
     )
 
     refresh_files_button.click(
@@ -506,7 +574,6 @@ with gr.Blocks(theme=gr.themes.Default(primary_hue="blue", secondary_hue="cyan")
         inputs=[],
         outputs=[export_status_output, export_download_output]
     )
-    # Use partial to pass the format argument to the generic export function
     from functools import partial
     export_md_button.click(
         fn=partial(export_combined_archive, export_format='md'),
@@ -520,9 +587,19 @@ with gr.Blocks(theme=gr.themes.Default(primary_hue="blue", secondary_hue="cyan")
     )
 
 
-    # Load initial file list on app start
+    # Load initial file list and GPU stats on app start/refresh
     demo.load(fn=list_processed_files, inputs=None, outputs=processed_files_output)
+    demo.load(fn=get_gpu_stats, inputs=None, outputs=gpu_stats_output, every=5)
 
 
 if __name__ == "__main__":
-    demo.launch(share=False)
+    try:
+        demo.launch(share=False)
+    finally:
+        # <<< --- Ensure NVML is shutdown properly --- >>>
+        if GPU_MONITORING_AVAILABLE:
+            try:
+                pynvml.nvmlShutdown()
+                print("INFO: NVML shut down successfully.")
+            except pynvml.NVMLError as error:
+                print(f"ERROR: Failed to shut down NVML: {error}")
