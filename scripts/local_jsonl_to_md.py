@@ -4,6 +4,7 @@ import json
 import os
 import glob
 import logging
+import re
 
 # Basic logging setup
 log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -21,6 +22,25 @@ def parse_args():
         help="Local directory to store output .md files.",
     )
     return parser.parse_args()
+
+def sanitize_for_xml(text):
+    """
+    Removes characters that are invalid in XML 1.0, except for tab, newline, and carriage return.
+    Also removes null bytes.
+    """
+    if not isinstance(text, str):
+        return text # Return as is if not a string
+
+    # Remove null bytes explicitly
+    text = text.replace('\x00', '')
+
+    # Regex to match invalid XML characters (control characters excluding \t, \n, \r)
+    # Reference: https://www.w3.org/TR/xml/#charsets
+    # Valid range: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+    # We remove characters in the ranges #x0-#x8, #xB-#xC, #xE-#x1F, #x7F-#x84, #x86-#x9F
+    # Simplified approach: remove most control chars except tab, newline, cr
+    invalid_xml_chars_re = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x84\x86-\x9F]')
+    return invalid_xml_chars_re.sub('', text)
 
 def main():
     args = parse_args()
@@ -57,9 +77,10 @@ def main():
                              source_file_base = os.path.splitext(os.path.basename(source_file_meta))[0]
                              source_file_base = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in source_file_base) # Sanitize
 
+                        sanitized_text = sanitize_for_xml(text_content)
 
                         # Append page break or separator? Maybe just double newline.
-                        output_md_content += text_content + "\n\n"
+                        output_md_content += sanitized_text + "\n\n"
 
                     except json.JSONDecodeError:
                         logger.warning(f"Failed to decode JSON line {i+1} in {jsonl_path}")

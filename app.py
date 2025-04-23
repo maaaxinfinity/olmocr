@@ -40,7 +40,9 @@ logger = logging.getLogger(__name__)
 # <<< --- GPU Stats Function --- >>>
 def get_gpu_stats():
     """获取 GPU 使用率和显存信息"""
+    print("DEBUG: get_gpu_stats() called") # <<< 添加调试打印
     if not GPU_MONITORING_AVAILABLE:
+        print(f"DEBUG: GPU Monitoring not available. Returning: {gpu_error_message}") # <<< 添加调试打印
         return gpu_error_message # Return the stored error message
 
     try:
@@ -62,13 +64,18 @@ def get_gpu_stats():
             f"显存使用率 (控制器): {mem_util}\n"
             f"已用显存: {mem_used_gb} / {mem_total_gb} ({mem_percent})"
         )
+        print(f"DEBUG: get_gpu_stats() success. Returning:\n{stats_str}") # <<< 添加调试打印
         return stats_str
     except pynvml.NVMLError as error:
-        logger.error(f"获取 GPU 状态失败: {error}")
-        return f"获取 GPU 状态失败: {error}"
+        error_msg = f"获取 GPU 状态失败: {error}"
+        logger.error(error_msg)
+        print(f"DEBUG: get_gpu_stats() NVMLError. Returning: {error_msg}") # <<< 添加调试打印
+        return error_msg
     except Exception as e:
+        error_msg = f"获取 GPU 状态时出错: {e}"
         logger.error(f"获取 GPU 状态时发生意外错误: {e}")
-        return f"获取 GPU 状态时出错: {e}"
+        print(f"DEBUG: get_gpu_stats() Exception. Returning: {error_msg}") # <<< 添加调试打印
+        return error_msg
 # ----------------------------
 
 def run_olmocr_on_pdf(pdf_file_list, target_dim, anchor_len, error_rate, max_context, max_retries, workers):
@@ -210,17 +217,86 @@ def run_olmocr_on_pdf(pdf_file_list, target_dim, anchor_len, error_rate, max_con
                 logs += f"--- Viewer STDOUT [{current_file_name}] ---\n{viewer_process.stdout}\n--- Viewer STDERR ---\n{viewer_process.stderr}\n"
 
                 if viewer_process.returncode == 0:
-                    base_persistent_jsonl_name = os.path.splitext(os.path.basename(persistent_jsonl_path))[0]
-                    viewer_html_files = glob.glob(os.path.join(PROCESSED_PREVIEW_DIR, f"{base_persistent_jsonl_name}*.html"))
+                    # <<< START: Construct expected HTML filename and wait >>>
+                    html_found = False
+                    final_html_path_persistent = None
+                    try:
+                        # Construct the expected filename based on the PDF path
+                        # Assumes app runs from the parent dir of GRADIO_WORKSPACE_DIR
+                        path_for_html_name = persistent_pdf_path.replace(os.sep, '_').replace('.', '_')
+                        expected_html_filename = path_for_html_name + ".html"
+                        expected_html_path = os.path.join(PROCESSED_PREVIEW_DIR, expected_html_filename)
+                        logs += f"调试：预期的 HTML 文件名: {expected_html_filename}\n"
+                        logger.info(f"[{current_file_name}] Expected HTML filename: {expected_html_filename}")
 
-                    if viewer_html_files:
-                        final_html_path_persistent = viewer_html_files[0]
-                        logs += f"预览文件已在目标目录生成: {final_html_path_persistent}\n"
-                        with open(final_html_path_persistent, 'r', encoding='utf-8') as f: html_content = f.read()
-                        last_successful_html = f"<iframe srcdoc='{html.escape(html_content)}' width='100%' height='800px' style='border: 1px solid #ccc;'></iframe>"
-                        logs += f"[{current_file_name}] HTML 预览内容已加载。\n"
+                        # Wait briefly for the specific file to appear
+                        max_wait_html = 5 # seconds
+                        wait_interval_html = 0.5
+                        start_wait_html = time.time()
+                        while time.time() - start_wait_html < max_wait_html:
+                            if os.path.exists(expected_html_path):
+                                logs += f"确认预期的 HTML 文件存在: {expected_html_path}\n"
+                                logger.info(f"[{current_file_name}] Found expected HTML file: {expected_html_path}")
+                                final_html_path_persistent = expected_html_path
+                                html_found = True
+                                break
+                            time.sleep(wait_interval_html)
+
+                        if not html_found:
+                            logs += f"警告：等待预期的 HTML 文件 {expected_html_filename} 超时。\n"
+                            logger.warning(f"[{current_file_name}] Timeout waiting for expected HTML file: {expected_html_filename}")
+
+                    except Exception as name_err:
+                        logs += f"警告：构造或检查预期 HTML 文件名时出错: {name_err}\n"
+                        logger.error(f"[{current_file_name}] Error constructing/checking expected HTML filename: {name_err}")
+                    # <<< END: Construct expected HTML filename and wait >>>
+
+                    # <<< START: Fallback to glob if specific file not found >>>
+                    if not html_found:
+                        logs += f"尝试使用 glob 查找 *.html 作为后备方案...\n"
+                        logger.info(f"[{current_file_name}] Falling back to glob search for *.html")
+                        try:
+                            # Log directory contents before globbing
+                            dir_contents = os.listdir(PROCESSED_PREVIEW_DIR)
+                            logs += f"调试：后备查找前目录内容 ({PROCESSED_PREVIEW_DIR}): {dir_contents}\n"
+                            logger.info(f"[{current_file_name}] Contents before fallback glob {PROCESSED_PREVIEW_DIR}: {dir_contents}")
+
+                            viewer_html_files = glob.glob(os.path.join(PROCESSED_PREVIEW_DIR, "*.html"))
+                            logs += f"后备查找 *.html 找到: {len(viewer_html_files)} 个文件\n"
+                            if viewer_html_files:
+                                viewer_html_files.sort()
+                                final_html_path_persistent = viewer_html_files[0] # Pick first one
+                                html_found = True
+                                logs += f"后备查找选中 HTML 文件: {final_html_path_persistent}\n"
+                                logger.info(f"[{current_file_name}] Fallback glob found and selected: {final_html_path_persistent}")
+
+                        except Exception as glob_err:
+                            logs += f"警告：后备 glob 查找 HTML 文件时出错: {glob_err}\n"
+                            logger.error(f"[{current_file_name}] Error during fallback glob search: {glob_err}")
+                    # <<< END: Fallback to glob >>>
+
+                    # Now check if we found an HTML file either way
+                    if html_found and final_html_path_persistent:
+                        # File should already be in the correct location
+                        # Sort to get a predictable file if multiple exist, e.g., alphabetically
+                        # viewer_html_files.sort()
+                        # final_html_path_persistent = viewer_html_files[0] # Pick the first one
+                        # logs += f"预览文件已在目标目录生成，选用: {final_html_path_persistent}\n"
+
+                        # Load content for immediate display
+                        try:
+                            with open(final_html_path_persistent, 'r', encoding='utf-8') as f: html_content = f.read()
+                            last_successful_html = f"<iframe srcdoc='{html.escape(html_content)}' width='100%' height='800px' style='border: 1px solid #ccc;'></iframe>"
+                            logs += f"[{current_file_name}] HTML 预览内容已加载。
+"
+                        except Exception as read_err:
+                            logs += f"错误：无法读取最终 HTML 文件 {final_html_path_persistent}: {read_err}\n"
+                            logger.error(f"[{current_file_name}] Failed to read final HTML file {final_html_path_persistent}: {read_err}")
+                            # Keep previous preview if read fails
                     else:
-                        logs += f"警告：[{current_file_name}] 在目标目录 {PROCESSED_PREVIEW_DIR} 中未找到生成的 HTML 预览文件。\n"
+                        logs += f"警告：[{current_file_name}] 在目标目录 {PROCESSED_PREVIEW_DIR} 中最终未找到或选中任何 HTML 预览文件。
+"
+                        # Keep the previous last_successful_html
                 else:
                     logs += f"警告：[{current_file_name}] 生成 HTML 预览失败。返回码: {viewer_process.returncode}\n"
 
