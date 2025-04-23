@@ -137,10 +137,10 @@ def run_olmocr_on_pdf(pdf_file_obj, target_dim, anchor_len, error_rate, max_cont
 
         # 6. Generate HTML Preview using dolmaviewer, running from parent dir
         viewer_cmd = ["python", "-m", "olmocr.viewer.dolmaviewer", persistent_jsonl_path] # Use persistent JSONL path
-        logs += f"执行预览生成命令 (工作目录: {GRADIO_WORKSPACE_DIR}): {' '.join(viewer_cmd)}\n"
-        logger.info(f"Executing viewer command in {GRADIO_WORKSPACE_DIR}: {' '.join(viewer_cmd)}")
-        # Run viewer command from the main workspace directory
-        viewer_process = subprocess.run(viewer_cmd, capture_output=True, text=True, check=False, cwd=GRADIO_WORKSPACE_DIR)
+        logs += f"执行预览生成命令 (工作目录: {os.getcwd()}): {' '.join(viewer_cmd)}\n" # Log current CWD
+        logger.info(f"Executing viewer command from default CWD: {' '.join(viewer_cmd)}")
+        # Run viewer command from the script's default working directory
+        viewer_process = subprocess.run(viewer_cmd, capture_output=True, text=True, check=False) # Removed cwd
         logs += f"--- Viewer STDOUT ---\n{viewer_process.stdout}\n--- Viewer STDERR ---\n{viewer_process.stderr}\n"
 
         if viewer_process.returncode == 0:
