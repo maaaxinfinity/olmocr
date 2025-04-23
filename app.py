@@ -8,16 +8,19 @@ import glob
 import time
 import logging
 import html # For escaping HTML content for srcdoc
+import zipfile # For creating zip archives
 
 # --- Configuration ---
 GRADIO_WORKSPACE_DIR = "gradio_workspace"
 PROCESSED_PDF_DIR = os.path.join(GRADIO_WORKSPACE_DIR, "processed_pdfs")   # For keeping original PDFs
 PROCESSED_JSONL_DIR = os.path.join(GRADIO_WORKSPACE_DIR, "processed_jsonl") # For keeping final JSONL
 PROCESSED_PREVIEW_DIR = os.path.join(GRADIO_WORKSPACE_DIR, "html_previews") # For keeping final HTML
+EXPORT_TEMP_DIR_BASE = os.path.join(GRADIO_WORKSPACE_DIR, "export_temp") # Base for export zips
 os.makedirs(GRADIO_WORKSPACE_DIR, exist_ok=True)
 os.makedirs(PROCESSED_PDF_DIR, exist_ok=True)
 os.makedirs(PROCESSED_JSONL_DIR, exist_ok=True)
 os.makedirs(PROCESSED_PREVIEW_DIR, exist_ok=True)
+os.makedirs(EXPORT_TEMP_DIR_BASE, exist_ok=True) # Ensure export base exists
 
 # --- Logging Setup ---
 # Basic logging setup for Gradio app itself
@@ -26,185 +29,175 @@ logging.basicConfig(level=logging.INFO, format=log_format)
 logger = logging.getLogger(__name__)
 # --------------------
 
-def run_olmocr_on_pdf(pdf_file_obj, target_dim, anchor_len, error_rate, max_context, max_retries, workers):
+def run_olmocr_on_pdf(pdf_file_list, target_dim, anchor_len, error_rate, max_context, max_retries, workers):
     """
-    Runs OLMOCR, saves PDF, JSONL, and HTML preview persistently.
+    Runs OLMOCR sequentially on a list of uploaded PDF files, yielding status updates.
     """
-    if pdf_file_obj is None:
-        return "", "错误：请先上传一个 PDF 文件。", "", []
+    if not pdf_file_list: # Check if list is empty or None
+        yield "", "错误：请先上传至少一个 PDF 文件。", "", [], "**无文件处理**"
+        return
 
-    run_dir = None
-    extracted_text = ""
-    logs = ""
-    html_content_escaped = ""
-    persistent_pdf_path = None
-    persistent_jsonl_path = None
+    all_extracted_text = ""
+    logs = "开始处理批次...\n"
+    last_successful_html = "<p>无可用预览</p>"
+    current_file_status_md = "**准备开始...**"
 
-    try:
-        # 1. Create unique temporary directory for OLMOCR *output*
-        run_dir = tempfile.mkdtemp(dir=GRADIO_WORKSPACE_DIR, prefix="olmocr_run_")
-        logs += f"创建临时 OLMOCR 工作区: {run_dir}\n"
-        logger.info(f"Created temporary run directory: {run_dir}")
+    # Initial yield to clear previous state and show starting status
+    yield "", logs, last_successful_html, list_processed_files(), current_file_status_md
 
-        # 2. Prepare paths and save input PDF persistently
-        original_filename = os.path.basename(pdf_file_obj.name)
-        base_name, _ = os.path.splitext(original_filename)
-        safe_base_name = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in base_name)
-        persistent_pdf_filename = safe_base_name + ".pdf"
-        persistent_pdf_path = os.path.join(PROCESSED_PDF_DIR, persistent_pdf_filename)
+    total_files = len(pdf_file_list)
+    processed_files_count = 0
+    failed_files_count = 0
 
-        # Copy uploaded file to the persistent PDF directory
-        shutil.copy(pdf_file_obj.name, persistent_pdf_path)
-        logs += f"已缓存上传的文件到: {persistent_pdf_path}\n"
-        logger.info(f"Copied uploaded file to persistent storage: {persistent_pdf_path}")
+    for i, pdf_file_obj in enumerate(pdf_file_list):
+        run_dir = None
+        persistent_pdf_path = None
+        persistent_jsonl_path = None
+        current_file_name = os.path.basename(pdf_file_obj.name)
+        current_file_status_md = f"**处理中 ({i+1}/{total_files}):** {current_file_name}"
+        logs += f"\n===== 开始处理文件 {i+1}/{total_files}: {current_file_name} =====\n"
 
-        # OLMOCR results will go into the temporary run_dir
-        olmocr_results_dir = os.path.join(run_dir, "results")
+        # Yield status update before starting the file processing
+        yield all_extracted_text, logs, last_successful_html, list_processed_files(), current_file_status_md
 
-        # 3. Construct OLMOCR Command using the persistent PDF path
-        cmd = [
-            "python", "-m", "olmocr.pipeline",
-            run_dir,                    # OLMOCR workspace is the temp dir
-            "--pdfs", persistent_pdf_path, # Input PDF is the persistent one
-            "--target_longest_image_dim", str(target_dim),
-            "--target_anchor_text_len", str(anchor_len),
-            "--max_page_error_rate", str(error_rate),
-            "--model_max_context", str(max_context),
-            "--max_page_retries", str(max_retries),
-            "--workers", str(workers)
-        ]
-        logs += f"执行命令: {' '.join(cmd)}\n"
-        logger.info(f"Executing command: {' '.join(cmd)}")
-
-        # 4. Run OLMOCR
-        process_start_time = time.time()
-        process = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        process_duration = time.time() - process_start_time
-        # --- Debugging ---
-        # logs += f"等待文件系统操作...\n"; logger.info("Waiting..."); time.sleep(2)
-        # try:
-        #     if os.path.exists(olmocr_results_dir): logs += f"结果目录内容: {os.listdir(olmocr_results_dir)}\n"; logger.info(f"Results dir contents: {os.listdir(olmocr_results_dir)}")
-        #     else: logs += f"结果目录不存在!\n"; logger.error("Results dir does not exist!")
-        # except Exception as list_err: logs += f"列出结果目录出错: {list_err}\n"; logger.error(f"Error listing results dir: {list_err}")
-        # --- End Debugging ---
-        logs += f"--- OLMOCR 日志开始 ---\nSTDOUT:\n{process.stdout}\nSTDERR:\n{process.stderr}\n--- OLMOCR 日志结束 ---\n"
-        logs += f"OLMOCR 进程完成，耗时: {process_duration:.2f} 秒, 返回码: {process.returncode}\n"
-        logger.info(f"OLMOCR process finished in {process_duration:.2f}s with code {process.returncode}")
-
-        if process.returncode != 0:
-            logs += f"\n错误：OLMOCR 处理失败。返回码: {process.returncode}\n"
-            return extracted_text, logs, "<p style='color:red;'>处理失败，请检查日志。</p>", list_processed_files()
-
-        # 5. Process Result File (JSONL) - Find it in the temporary results dir
-        jsonl_files_temp = glob.glob(os.path.join(olmocr_results_dir, "output_*.jsonl"))
-        if not jsonl_files_temp:
-            logs += f"\n错误：在临时目录 {olmocr_results_dir} 中未找到 OLMOCR 输出文件 (output_*.jsonl)。\n"
-            return extracted_text, logs, "<p style='color:red;'>未找到结果文件。</p>", list_processed_files()
-
-        temp_jsonl_path = jsonl_files_temp[0]
-        logs += f"找到临时结果文件: {temp_jsonl_path}\n"
-
-        # Copy JSONL to persistent directory
-        persistent_jsonl_filename = f"{safe_base_name}_output.jsonl"
-        persistent_jsonl_path = os.path.join(PROCESSED_JSONL_DIR, persistent_jsonl_filename)
         try:
+            # 1. Create unique temporary directory for this file's OLMOCR output
+            run_dir = tempfile.mkdtemp(dir=GRADIO_WORKSPACE_DIR, prefix=f"olmocr_run_{i}_")
+            logs += f"创建临时 OLMOCR 工作区: {run_dir}\n"
+            logger.info(f"[{current_file_name}] Created temporary run directory: {run_dir}")
+            # No yield here, part of setup
+
+            # 2. Prepare paths and save input PDF persistently
+            base_name, _ = os.path.splitext(current_file_name)
+            safe_base_name = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in base_name)
+            persistent_pdf_filename = safe_base_name + ".pdf"
+            persistent_pdf_path = os.path.join(PROCESSED_PDF_DIR, persistent_pdf_filename)
+
+            shutil.copy(pdf_file_obj.name, persistent_pdf_path)
+            logs += f"已缓存上传的文件到: {persistent_pdf_path}\n"
+            logger.info(f"[{current_file_name}] Copied uploaded file to persistent storage: {persistent_pdf_path}")
+            # No yield here
+
+            olmocr_results_dir = os.path.join(run_dir, "results")
+
+            # 3. Construct OLMOCR Command
+            cmd = [
+                "python", "-m", "olmocr.pipeline",
+                run_dir,
+                "--pdfs", persistent_pdf_path,
+                "--target_longest_image_dim", str(target_dim),
+                "--target_anchor_text_len", str(anchor_len),
+                "--max_page_error_rate", str(error_rate),
+                "--model_max_context", str(max_context),
+                "--max_page_retries", str(max_retries),
+                "--workers", str(workers)
+            ]
+            logs += f"执行命令: {' '.join(cmd)}\n"
+            logger.info(f"[{current_file_name}] Executing command: {' '.join(cmd)}")
+            yield all_extracted_text, logs, last_successful_html, list_processed_files(), current_file_status_md
+
+            # 4. Run OLMOCR
+            process_start_time = time.time()
+            process = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            process_duration = time.time() - process_start_time
+            logs += f"--- OLMOCR 日志 [{current_file_name}] 开始 ---\nSTDOUT:\n{process.stdout}\nSTDERR:\n{process.stderr}\n--- OLMOCR 日志结束 ---\n"
+            logs += f"OLMOCR 进程完成 [{current_file_name}]，耗时: {process_duration:.2f} 秒, 返回码: {process.returncode}\n"
+            logger.info(f"[{current_file_name}] OLMOCR process finished in {process_duration:.2f}s with code {process.returncode}")
+            # Yield after OLMOCR run completes
+            yield all_extracted_text, logs, last_successful_html, list_processed_files(), current_file_status_md
+
+            if process.returncode != 0:
+                raise RuntimeError(f"OLMOCR failed (Code: {process.returncode})")
+
+            # 5. Process Result File (JSONL)
+            jsonl_files_temp = glob.glob(os.path.join(olmocr_results_dir, "output_*.jsonl"))
+            if not jsonl_files_temp:
+                raise FileNotFoundError(f"在临时目录 {olmocr_results_dir} 中未找到 OLMOCR 输出文件。")
+
+            temp_jsonl_path = jsonl_files_temp[0]
+            persistent_jsonl_filename = f"{safe_base_name}_output.jsonl"
+            persistent_jsonl_path = os.path.join(PROCESSED_JSONL_DIR, persistent_jsonl_filename)
             shutil.copy(temp_jsonl_path, persistent_jsonl_path)
             logs += f"结果 JSONL 文件已保存到: {persistent_jsonl_path}\n"
-            logger.info(f"Copied JSONL file to persistent storage: {persistent_jsonl_path}")
-        except Exception as e:
-            logs += f"复制 JSONL 文件时出错: {e}\n"
-            logger.exception("Error copying JSONL file")
-            return extracted_text, logs, "<p style='color:red;'>保存结果文件出错。</p>", list_processed_files()
+            logger.info(f"[{current_file_name}] Copied JSONL file to persistent storage: {persistent_jsonl_path}")
 
-
-        # Extract text from the persistent JSONL
-        try:
-            temp_extracted_text = ""
+            # Extract text
+            file_extracted_text = ""
             with open(persistent_jsonl_path, 'r', encoding='utf-8') as f:
                 for line in f:
                     if line.strip():
                         data = json.loads(line)
-                        # Ensure 'text' key exists and is not None before appending
                         page_text = data.get("text")
                         if page_text is not None:
-                             temp_extracted_text += page_text + "\n\n"
-            extracted_text = temp_extracted_text.strip()
-            logs += "成功提取文本内容。\n"
-        except Exception as e:
-            logs += f"解析结果文件时出错: {e}\n"
-            return extracted_text, logs, "<p style='color:red;'>解析结果文件出错。</p>", list_processed_files()
+                             file_extracted_text += page_text + "\n\n"
+            all_extracted_text += f"===== 文件: {current_file_name} =====\n\n" + file_extracted_text.strip() + "\n\n"
+            logs += f"成功提取 [{current_file_name}] 文本内容。\n"
+            # Yield with updated combined text
+            yield all_extracted_text, logs, last_successful_html, list_processed_files(), current_file_status_md
 
+            # 6. Generate HTML Preview
+            viewer_cmd = ["python", "-m", "olmocr.viewer.dolmaviewer", persistent_jsonl_path]
+            logs += f"执行预览生成命令 [{current_file_name}] (工作目录: {GRADIO_WORKSPACE_DIR}): {' '.join(viewer_cmd)}\n"
+            viewer_process = subprocess.run(viewer_cmd, capture_output=True, text=True, check=False, cwd=GRADIO_WORKSPACE_DIR)
+            logs += f"--- Viewer STDOUT [{current_file_name}] ---\n{viewer_process.stdout}\n--- Viewer STDERR ---\n{viewer_process.stderr}\n"
 
-        # 6. Generate HTML Preview using dolmaviewer, running from parent dir
-        viewer_cmd = ["python", "-m", "olmocr.viewer.dolmaviewer", persistent_jsonl_path] # Use persistent JSONL path
-        logs += f"执行预览生成命令 (工作目录: {os.getcwd()}): {' '.join(viewer_cmd)}\n" # Log current CWD
-        logger.info(f"Executing viewer command from default CWD: {' '.join(viewer_cmd)}")
-        # Run viewer command from the script's default working directory
-        viewer_process = subprocess.run(viewer_cmd, capture_output=True, text=True, check=False) # Removed cwd
-        logs += f"--- Viewer STDOUT ---\n{viewer_process.stdout}\n--- Viewer STDERR ---\n{viewer_process.stderr}\n"
+            if viewer_process.returncode == 0:
+                html_preview_dir_viewer = os.path.join(GRADIO_WORKSPACE_DIR, "dolma_previews")
+                base_persistent_jsonl_name = os.path.splitext(os.path.basename(persistent_jsonl_path))[0]
+                viewer_html_files = glob.glob(os.path.join(html_preview_dir_viewer, f"{base_persistent_jsonl_name}*.html")) or glob.glob(os.path.join(html_preview_dir_viewer, "*.html"))
 
-        if viewer_process.returncode == 0:
-            # Viewer creates 'dolma_previews' in the CWD (where app.py is)
-            html_preview_dir_viewer_in_cwd = "dolma_previews" # Relative path in CWD
-            # Find the HTML file based on the persistent JSONL name within CWD/dolma_previews
-            base_persistent_jsonl_name = os.path.splitext(os.path.basename(persistent_jsonl_path))[0]
-            viewer_html_files = glob.glob(os.path.join(html_preview_dir_viewer_in_cwd, f"{base_persistent_jsonl_name}*.html")) \
-                              or glob.glob(os.path.join(html_preview_dir_viewer_in_cwd, "*.html")) # Fallback
-
-            if viewer_html_files:
-                viewer_html_path_in_cwd = viewer_html_files[0] # Path relative to script CWD
-                # Define the final persistent path for the preview
-                persistent_html_filename = f"{safe_base_name}_preview.html"
-                final_html_path_persistent = os.path.join(PROCESSED_PREVIEW_DIR, persistent_html_filename)
-
-                # Move the generated HTML from CWD/dolma_previews to the final persistent preview directory
-                try:
+                if viewer_html_files:
+                    viewer_html_path_in_cwd = viewer_html_files[0]
+                    persistent_html_filename = f"{safe_base_name}_preview.html"
+                    final_html_path_persistent = os.path.join(PROCESSED_PREVIEW_DIR, persistent_html_filename)
                     shutil.move(viewer_html_path_in_cwd, final_html_path_persistent)
-                    logs += f"预览文件已移动到: {final_html_path_persistent}\n"
-                    logger.info(f"Moved preview file to persistent storage: {final_html_path_persistent}")
+                    logs += f"预览文件已保存到: {final_html_path_persistent}\n"
+                    if os.path.exists(html_preview_dir_viewer):
+                        try: os.rmdir(html_preview_dir_viewer)
+                        except OSError: pass
 
-                    # Clean up the (now possibly empty) dolma_previews dir created by viewer in CWD
-                    if os.path.exists(html_preview_dir_viewer_in_cwd):
-                        try:
-                            os.rmdir(html_preview_dir_viewer_in_cwd) # Remove only if empty
-                            logger.info(f"Removed empty viewer output dir: {html_preview_dir_viewer_in_cwd}")
-                        except OSError:
-                            logger.warning(f"Viewer output dir {html_preview_dir_viewer_in_cwd} not empty or other error, not removed.")
-                            pass # Ignore if not empty or other error
-
-                    # Load content for immediate display from the new persistent location
-                    with open(final_html_path_persistent, 'r', encoding='utf-8') as f:
-                        html_content = f.read()
-                    html_content_escaped = f"<iframe srcdoc='{html.escape(html_content)}' width='100%' height='800px' style='border: 1px solid #ccc;'></iframe>"
-                    logs += "HTML 预览内容已加载。\n"
-
-                except Exception as e:
-                    logs += f"移动或读取 HTML 预览文件时出错: {e}\n"
-                    logger.exception(f"Error moving/reading HTML preview file")
-                    html_content_escaped = "<p style='color:orange;'>无法加载 HTML 预览内容。</p>"
+                    # Load content for immediate display
+                    with open(final_html_path_persistent, 'r', encoding='utf-8') as f: html_content = f.read()
+                    last_successful_html = f"<iframe srcdoc='{html.escape(html_content)}' width='100%' height='800px' style='border: 1px solid #ccc;'></iframe>"
+                    logs += f"[{current_file_name}] HTML 预览内容已加载。\n"
+                else:
+                    logs += f"警告：[{current_file_name}] 未找到生成的 HTML 预览文件。\n"
+                    # Keep the previous last_successful_html
             else:
-                logs += f"警告：在 {html_preview_dir_viewer_in_cwd} 中未找到生成的 HTML 预览文件。\n" # Updated log message
-                html_content_escaped = "<p style='color:orange;'>未找到 HTML 预览文件。</p>"
-        else:
-            logs += f"警告：生成 HTML 预览失败。返回码: {viewer_process.returncode}\n"
-            html_content_escaped = "<p style='color:orange;'>生成 HTML 预览失败。</p>"
+                logs += f"警告：[{current_file_name}] 生成 HTML 预览失败。返回码: {viewer_process.returncode}\n"
+                # Keep the previous last_successful_html
 
-        return extracted_text, logs, html_content_escaped, list_processed_files()
+            # Update status for successful file
+            processed_files_count += 1
+            current_file_status_md = f"**已完成 ({i+1}/{total_files}):** {current_file_name}"
+            # Yield final state for this successful file (including updated file list)
+            yield all_extracted_text, logs, last_successful_html, list_processed_files(), current_file_status_md
 
-    except Exception as e:
-        error_message = f"发生意外错误: {e}\n"
-        logs += error_message
-        logger.exception("An unexpected error occurred during OLMOCR processing.")
-        return "", logs, f"<p style='color:red;'>发生意外错误: {e}</p>", list_processed_files()
+        except Exception as e:
+            failed_files_count += 1
+            error_message = f"\n**处理文件 {current_file_name} 时发生错误:** {e}\n"
+            logs += error_message
+            logger.exception(f"Error processing file {current_file_name}")
+            current_file_status_md = f"**失败 ({i+1}/{total_files}):** {current_file_name} - 跳过"
+            # Yield error status, keep previous successful outputs
+            yield all_extracted_text, logs, last_successful_html, list_processed_files(), current_file_status_md
+            continue # Move to the next file
 
-    finally:
-        # 7. Cleanup the temporary run directory (run_dir) - This is now safe
-        if run_dir and os.path.exists(run_dir):
-            try:
-                shutil.rmtree(run_dir)
-                logger.info(f"Cleaned up temporary run directory: {run_dir}")
-            except OSError as e:
-                logger.error(f"Failed to remove temporary run directory {run_dir}: {e}")
+        finally:
+            # Cleanup the temporary run directory for this file
+            if run_dir and os.path.exists(run_dir):
+                try:
+                    shutil.rmtree(run_dir)
+                    logger.info(f"[{current_file_name}] Cleaned up temporary run directory: {run_dir}")
+                except OSError as e:
+                    logger.error(f"[{current_file_name}] Failed to remove temporary run directory {run_dir}: {e}")
+                    logs += f"警告：无法删除临时运行目录 {run_dir}: {e}\n"
+
+    # Final status update after the loop finishes
+    final_status_message = f"**批处理完成。成功: {processed_files_count}, 失败: {failed_files_count} / 总计: {total_files}**"
+    logs += f"\n===== {final_status_message} =====\n"
+    logger.info(final_status_message)
+    yield all_extracted_text.strip(), logs, last_successful_html, list_processed_files(), final_status_message
 
 def clear_temp_workspace():
     """Clears only the temporary run directories (olmocr_run_*) from the Gradio workspace."""
@@ -287,14 +280,162 @@ def list_processed_files():
         preview_files.sort() # Fallback to alphabetical sort
     return preview_files
 
+# --- Helper function for zipping ---
+def create_zip_from_dir(dir_path, zip_path):
+    """Creates a zip archive from a directory."""
+    try:
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, _, files in os.walk(dir_path):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    # Arcname is the path inside the zip file
+                    arcname = os.path.relpath(file_path, start=dir_path)
+                    zipf.write(file_path, arcname=arcname)
+        logger.info(f"Successfully created zip file: {zip_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Error creating zip file {zip_path} from {dir_path}: {e}")
+        return False
+
+# --- Export Functions ---
+def export_html_archive():
+    """Zips all HTML files from the processed preview directory."""
+    status = ""
+    zip_file_path = None
+    try:
+        if not os.listdir(PROCESSED_PREVIEW_DIR):
+             status = "没有 HTML 预览文件可打包。"
+             logger.warning(status)
+             return status, None
+
+        # Create zip in the main workspace for easier access/cleanup? Or temp? Let's use temp.
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        zip_filename = f"olmocr_html_export_{timestamp}.zip"
+        zip_file_path = os.path.join(EXPORT_TEMP_DIR_BASE, zip_filename)
+
+        if create_zip_from_dir(PROCESSED_PREVIEW_DIR, zip_file_path):
+            status = f"HTML 文件已成功打包到 {zip_filename}。"
+            return status, zip_file_path
+        else:
+            status = "打包 HTML 文件时出错。"
+            return status, None
+    except Exception as e:
+        status = f"导出 HTML 时发生错误: {e}"
+        logger.exception("Error during HTML export.")
+        return status, None
+
+def run_conversion_script(script_name, input_dir, output_dir):
+    """Helper to run a conversion script."""
+    script_path = os.path.join("scripts", script_name) # Assumes scripts are in a 'scripts' subdir
+    if not os.path.exists(script_path):
+        raise FileNotFoundError(f"转换脚本未找到: {script_path}")
+
+    cmd = ["python", script_path, input_dir, output_dir]
+    logger.info(f"运行转换脚本: {' '.join(cmd)}")
+    process = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    logger.info(f"脚本 {script_name} STDOUT:\n{process.stdout}")
+    logger.error(f"脚本 {script_name} STDERR:\n{process.stderr}")
+    if process.returncode != 0:
+        raise RuntimeError(f"脚本 {script_name} 执行失败 (Code: {process.returncode}): {process.stderr}")
+    logger.info(f"脚本 {script_name} 执行成功。")
+
+
+def export_combined_archive(export_format):
+    """
+    Exports specified format (md or docx) along with corresponding HTML previews.
+
+    Args:
+        export_format (str): Either 'md' or 'docx'.
+
+    Returns:
+        Tuple (status_message, zip_file_path or None)
+    """
+    status = f"开始导出 {export_format.upper()} (包含 HTML)..."
+    logger.info(status)
+    export_temp_dir = None
+    zip_file_path = None
+
+    if export_format not in ['md', 'docx']:
+        return "无效的导出格式。", None
+
+    if not os.listdir(PROCESSED_JSONL_DIR):
+        status = "没有 JSONL 文件可供转换。"
+        logger.warning(status)
+        return status, None
+
+    try:
+        # Create a unique temporary directory for this export
+        export_temp_dir = tempfile.mkdtemp(dir=EXPORT_TEMP_DIR_BASE, prefix=f"{export_format}_export_")
+        status += f"\n创建临时导出目录: {export_temp_dir}"
+        logger.info(f"Created temporary export directory: {export_temp_dir}")
+
+        # Run the appropriate conversion script
+        script_name = "local_jsonl_to_md.py" if export_format == 'md' else "jsonl_to_docx.py"
+        status += f"\n运行 {script_name}..."
+        run_conversion_script(script_name, PROCESSED_JSONL_DIR, export_temp_dir)
+        status += f"\n{export_format.upper()} 文件已生成。"
+
+        # Copy corresponding HTML files
+        copied_html_count = 0
+        status += f"\n复制 HTML 预览文件..."
+        logger.info("Copying HTML files...")
+        generated_files = glob.glob(os.path.join(export_temp_dir, f"*.{export_format}"))
+        for gen_file_path in generated_files:
+            base_name = os.path.splitext(os.path.basename(gen_file_path))[0]
+            # Assume HTML name convention: base_name + "_preview.html"
+            html_file_name = f"{base_name}_preview.html"
+            html_src_path = os.path.join(PROCESSED_PREVIEW_DIR, html_file_name)
+            if os.path.exists(html_src_path):
+                html_dest_path = os.path.join(export_temp_dir, html_file_name)
+                try:
+                    shutil.copy(html_src_path, html_dest_path)
+                    copied_html_count += 1
+                except Exception as copy_e:
+                    logger.warning(f"无法复制 HTML 文件 {html_src_path}: {copy_e}")
+                    status += f"\n警告：无法复制 {html_file_name}"
+            else:
+                 logger.warning(f"未找到对应的 HTML 文件: {html_file_name}")
+                 status += f"\n警告：未找到 {html_file_name}"
+
+        status += f"\n已复制 {copied_html_count} 个 HTML 文件。"
+        logger.info(f"Copied {copied_html_count} HTML files.")
+
+        # Create the zip archive
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        zip_filename = f"olmocr_{export_format}_export_{timestamp}.zip"
+        # Place zip directly in export base dir for simpler management
+        zip_file_path = os.path.join(EXPORT_TEMP_DIR_BASE, zip_filename)
+        status += f"\n创建 Zip 文件: {zip_filename}..."
+
+        if create_zip_from_dir(export_temp_dir, zip_file_path):
+            status += f"\n导出成功完成。"
+            return status, zip_file_path
+        else:
+            status += f"\n错误：创建 Zip 文件失败。"
+            return status, None
+
+    except Exception as e:
+        status += f"\n导出过程中发生错误: {e}"
+        logger.exception(f"Error during {export_format} export.")
+        return status, None
+    finally:
+        # Clean up the temporary export directory
+        if export_temp_dir and os.path.exists(export_temp_dir):
+            try:
+                shutil.rmtree(export_temp_dir)
+                logger.info(f"Cleaned up temporary export directory: {export_temp_dir}")
+            except OSError as e:
+                logger.error(f"Failed to remove temporary export directory {export_temp_dir}: {e}")
+
+
 # --- Gradio Interface ---
 with gr.Blocks(theme=gr.themes.Default(primary_hue="blue", secondary_hue="cyan")) as demo:
-    gr.Markdown("# OLMOCR PDF 分析工具")
-    gr.Markdown('上传 PDF 文件，调整参数（可选），然后点击"开始分析"。处理结果（PDF/JSONL/HTML）会保存在工作区。')
+    gr.Markdown("# OLMOCR PDF 批处理工具")
+    gr.Markdown('上传一个或多个 PDF 文件，调整参数（可选），然后点击"开始分析"。处理结果（PDF/JSONL/HTML）会保存在工作区。')
 
     with gr.Row():
         with gr.Column(scale=1):
-            pdf_input = gr.File(label="上传 PDF 文件", file_types=[".pdf"])
+            pdf_input = gr.File(label="上传 PDF 文件 (可多选)", file_count="multiple", file_types=[".pdf"])
             gr.Markdown("### OLMOCR 参数调整")
             target_dim_slider = gr.Slider(label="图像最大尺寸", minimum=256, maximum=2048, value=720, step=64)
             anchor_len_slider = gr.Slider(label="锚点文本长度", minimum=50, maximum=32768, value=16384, step=100)
@@ -305,42 +446,52 @@ with gr.Blocks(theme=gr.themes.Default(primary_hue="blue", secondary_hue="cyan")
             analyze_button = gr.Button("开始分析", variant="primary")
 
             gr.Markdown("---")
+            file_status_output = gr.Markdown(label="处理进度")
+
+            gr.Markdown("---")
             with gr.Accordion("缓存管理", open=False):
                 clear_temp_button = gr.Button("清理临时运行目录", variant="secondary")
-                clear_processed_button = gr.Button("清理所有已处理文件 (PDF/JSONL/HTML)", variant="stop")
-                clear_output = gr.Textbox(label="清理状态", interactive=False, lines=3)
+                clear_processed_button = gr.Button("清理所有已处理文件", variant="stop")
+                clear_status_output = gr.Textbox(label="清理状态", interactive=False, lines=3) # Renamed output
 
 
         with gr.Column(scale=3):
             with gr.Tabs():
                 with gr.TabItem("提取结果 (文本)"):
-                    text_output = gr.Textbox(label="提取的文本内容", lines=25, interactive=False)
-                with gr.TabItem("HTML 预览 (当前文件)"):
+                    text_output = gr.Textbox(label="所有成功处理文件的文本内容", lines=25, interactive=False)
+                with gr.TabItem("HTML 预览 (最后一个成功文件)"):
                     html_output = gr.HTML(label="预览 (HTML)")
-                with gr.TabItem("处理日志 (完成后显示)"):
-                    log_output = gr.Textbox(label="日志和状态", lines=30, interactive=False)
-                with gr.TabItem("已处理文件列表"):
+                with gr.TabItem("处理日志 (聚合)"):
+                    log_output = gr.Textbox(label="所有文件的日志和状态", lines=30, interactive=False)
+                with gr.TabItem("已处理文件列表与导出"): # Updated Tab Name
                     refresh_files_button = gr.Button("刷新列表")
                     processed_files_output = gr.Files(label="已保存的预览文件 (HTML)", file_count="multiple", type="filepath")
+                    gr.Markdown("### 导出选项")
+                    with gr.Row():
+                        export_html_button = gr.Button("打包下载 HTML")
+                        export_md_button = gr.Button("导出 Markdown (含HTML)")
+                        export_docx_button = gr.Button("导出 DOCX (含HTML)")
+                    export_status_output = gr.Textbox(label="导出状态", interactive=False, lines=3)
+                    export_download_output = gr.File(label="下载导出的 Zip 文件", interactive=False)
 
 
     # Button actions
     analyze_button.click(
         fn=run_olmocr_on_pdf,
         inputs=[pdf_input, target_dim_slider, anchor_len_slider, error_rate_slider, model_context_input, max_retries_input, workers_input],
-        outputs=[text_output, log_output, html_output, processed_files_output]
+        outputs=[text_output, log_output, html_output, processed_files_output, file_status_output]
     )
 
     clear_temp_button.click(
         fn=clear_temp_workspace,
         inputs=[],
-        outputs=[clear_output]
+        outputs=[clear_status_output] # Use renamed output
     )
 
     clear_processed_button.click(
         fn=clear_all_processed_data,
         inputs=[],
-        outputs=[clear_output, processed_files_output] # Clear file list as well
+        outputs=[clear_status_output, processed_files_output, file_status_output] # Clear status too
     )
 
     refresh_files_button.click(
@@ -349,10 +500,29 @@ with gr.Blocks(theme=gr.themes.Default(primary_hue="blue", secondary_hue="cyan")
         outputs=[processed_files_output]
     )
 
+    # Export Button Actions
+    export_html_button.click(
+        fn=export_html_archive,
+        inputs=[],
+        outputs=[export_status_output, export_download_output]
+    )
+    # Use partial to pass the format argument to the generic export function
+    from functools import partial
+    export_md_button.click(
+        fn=partial(export_combined_archive, export_format='md'),
+        inputs=[],
+        outputs=[export_status_output, export_download_output]
+    )
+    export_docx_button.click(
+        fn=partial(export_combined_archive, export_format='docx'),
+        inputs=[],
+        outputs=[export_status_output, export_download_output]
+    )
+
+
     # Load initial file list on app start
     demo.load(fn=list_processed_files, inputs=None, outputs=processed_files_output)
 
 
 if __name__ == "__main__":
-    # Launch the Gradio app
     demo.launch(share=False)
