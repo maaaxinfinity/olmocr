@@ -287,8 +287,7 @@ def run_olmocr_on_pdf(pdf_file_list, target_dim, anchor_len, error_rate, max_con
                         try:
                             with open(final_html_path_persistent, 'r', encoding='utf-8') as f: html_content = f.read()
                             last_successful_html = f"<iframe srcdoc='{html.escape(html_content)}' width='100%' height='800px' style='border: 1px solid #ccc;'></iframe>"
-                            logs += f"[{current_file_name}] HTML 预览内容已加载。
-"
+                            logs += f"[{current_file_name}] HTML 预览内容已加载。\n"
                         except Exception as read_err:
                             logs += f"错误：无法读取最终 HTML 文件 {final_html_path_persistent}: {read_err}\n"
                             logger.error(f"[{current_file_name}] Failed to read final HTML file {final_html_path_persistent}: {read_err}")
