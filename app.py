@@ -27,7 +27,7 @@ def run_olmocr_on_pdf(pdf_file_obj, target_dim, anchor_len, error_rate, max_cont
     Runs OLMOCR, saves HTML preview persistently, returns results and logs.
     """
     if pdf_file_obj is None:
-        return "", "错误：请先上传一个 PDF 文件。", "", [] # Added empty list for file output
+        return "", "错误：请先上传一个 PDF 文件。", "" # Removed file list output
 
     run_dir = None
     extracted_text = ""
@@ -87,13 +87,13 @@ def run_olmocr_on_pdf(pdf_file_obj, target_dim, anchor_len, error_rate, max_cont
 
         if process.returncode != 0:
             logs += f"\n错误：OLMOCR 处理失败。返回码: {process.returncode}\n"
-            return extracted_text, logs, "<p style='color:red;'>处理失败，请检查日志。</p>", list_processed_files()
+            return extracted_text, logs, "<p style='color:red;'>处理失败，请检查日志。</p>" # Removed file list output
 
         # 5. Process Result File (JSONL)
         jsonl_files = glob.glob(os.path.join(olmocr_results_dir, "output_*.jsonl"))
         if not jsonl_files:
             logs += f"\n错误：未找到 OLMOCR 输出文件 (output_*.jsonl)。\n"
-            return extracted_text, logs, "<p style='color:red;'>未找到结果文件。</p>", list_processed_files()
+            return extracted_text, logs, "<p style='color:red;'>未找到结果文件。</p>" # Removed file list output
 
         jsonl_output_path = jsonl_files[0]
         logs += f"找到结果文件: {jsonl_output_path}\n"
@@ -108,7 +108,7 @@ def run_olmocr_on_pdf(pdf_file_obj, target_dim, anchor_len, error_rate, max_cont
             logs += "成功提取文本内容。\n"
         except Exception as e:
             logs += f"解析结果文件时出错: {e}\n"
-            return extracted_text, logs, "<p style='color:red;'>解析结果文件出错。</p>", list_processed_files()
+            return extracted_text, logs, "<p style='color:red;'>解析结果文件出错。</p>" # Removed file list output
 
 
         # 6. Generate HTML Preview using dolmaviewer
@@ -158,14 +158,14 @@ def run_olmocr_on_pdf(pdf_file_obj, target_dim, anchor_len, error_rate, max_cont
             logs += f"警告：生成 HTML 预览失败。返回码: {viewer_process.returncode}\n"
             html_content_escaped = "<p style='color:orange;'>生成 HTML 预览失败。</p>"
 
-        # Return final results including the updated file list
-        return extracted_text, logs, html_content_escaped, list_processed_files()
+        # Return final results WITHOUT the updated file list
+        return extracted_text, logs, html_content_escaped # Removed list_processed_files()
 
     except Exception as e:
         error_message = f"发生意外错误: {e}\n"
         logs += error_message
         logger.exception("An unexpected error occurred during OLMOCR processing.")
-        return "", logs, f"<p style='color:red;'>发生意外错误: {e}</p>", list_processed_files()
+        return "", logs, f"<p style='color:red;'>发生意外错误: {e}</p>" # Removed file list output
 
     finally:
         # 7. Cleanup the temporary run directory (run_dir)
@@ -292,7 +292,7 @@ with gr.Blocks(theme=gr.themes.Default(primary_hue="blue", secondary_hue="cyan")
     analyze_button.click(
         fn=run_olmocr_on_pdf,
         inputs=[pdf_input, target_dim_slider, anchor_len_slider, error_rate_slider, model_context_input, max_retries_input, workers_input],
-        outputs=[text_output, log_output, html_output, processed_files_output] # Add processed_files_output
+        outputs=[text_output, log_output, html_output] # Removed processed_files_output
     )
 
     clear_temp_button.click(
