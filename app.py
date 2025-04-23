@@ -514,7 +514,7 @@ with gr.Blocks(theme=gr.themes.Default(primary_hue="blue", secondary_hue="cyan")
 
             gr.Markdown("---")
             gr.Markdown("### GPU 监控")
-            gpu_stats_output = gr.Textbox(label="GPU 状态", lines=3, interactive=False)
+            gpu_stats_output = gr.Textbox(label="GPU 状态", lines=3, interactive=False, every=5)
 
             gr.Markdown("---")
             with gr.Accordion("缓存管理", open=False):
@@ -587,9 +587,8 @@ with gr.Blocks(theme=gr.themes.Default(primary_hue="blue", secondary_hue="cyan")
     )
 
 
-    # Load initial file list and GPU stats on app start/refresh
+    # Load initial file list on app start/refresh
     demo.load(fn=list_processed_files, inputs=None, outputs=processed_files_output)
-    demo.load(fn=get_gpu_stats, inputs=None, outputs=gpu_stats_output, every=5)
 
 
 if __name__ == "__main__":
