@@ -144,35 +144,35 @@ def run_olmocr_on_pdf(pdf_file_obj, target_dim, anchor_len, error_rate, max_cont
         logs += f"--- Viewer STDOUT ---\n{viewer_process.stdout}\n--- Viewer STDERR ---\n{viewer_process.stderr}\n"
 
         if viewer_process.returncode == 0:
-            # Viewer creates 'dolma_previews' in the CWD (GRADIO_WORKSPACE_DIR)
-            html_preview_dir_viewer = os.path.join(GRADIO_WORKSPACE_DIR, "dolma_previews")
-            # Find the HTML file based on the persistent JSONL name
+            # Viewer creates 'dolma_previews' in the CWD (where app.py is)
+            html_preview_dir_viewer_in_cwd = "dolma_previews" # Relative path in CWD
+            # Find the HTML file based on the persistent JSONL name within CWD/dolma_previews
             base_persistent_jsonl_name = os.path.splitext(os.path.basename(persistent_jsonl_path))[0]
-            viewer_html_files = glob.glob(os.path.join(html_preview_dir_viewer, f"{base_persistent_jsonl_name}*.html")) \
-                              or glob.glob(os.path.join(html_preview_dir_viewer, "*.html")) # Fallback
+            viewer_html_files = glob.glob(os.path.join(html_preview_dir_viewer_in_cwd, f"{base_persistent_jsonl_name}*.html")) \
+                              or glob.glob(os.path.join(html_preview_dir_viewer_in_cwd, "*.html")) # Fallback
 
             if viewer_html_files:
-                viewer_html_path = viewer_html_files[0]
+                viewer_html_path_in_cwd = viewer_html_files[0] # Path relative to script CWD
                 # Define the final persistent path for the preview
                 persistent_html_filename = f"{safe_base_name}_preview.html"
                 final_html_path_persistent = os.path.join(PROCESSED_PREVIEW_DIR, persistent_html_filename)
 
-                # Move the generated HTML to the final persistent preview directory
+                # Move the generated HTML from CWD/dolma_previews to the final persistent preview directory
                 try:
-                    # shutil.move is better than copy here
-                    shutil.move(viewer_html_path, final_html_path_persistent)
-                    # Clean up the (now possibly empty) dolma_previews dir created by viewer
-                    if os.path.exists(html_preview_dir_viewer):
-                         try:
-                            os.rmdir(html_preview_dir_viewer) # Remove only if empty
-                         except OSError:
-                            logger.warning(f"Viewer preview dir {html_preview_dir_viewer} not empty, not removed.")
-                            pass # Ignore if not empty
-
-                    logs += f"预览文件已保存到: {final_html_path_persistent}\n"
+                    shutil.move(viewer_html_path_in_cwd, final_html_path_persistent)
+                    logs += f"预览文件已移动到: {final_html_path_persistent}\n"
                     logger.info(f"Moved preview file to persistent storage: {final_html_path_persistent}")
 
-                    # Load content for immediate display
+                    # Clean up the (now possibly empty) dolma_previews dir created by viewer in CWD
+                    if os.path.exists(html_preview_dir_viewer_in_cwd):
+                        try:
+                            os.rmdir(html_preview_dir_viewer_in_cwd) # Remove only if empty
+                            logger.info(f"Removed empty viewer output dir: {html_preview_dir_viewer_in_cwd}")
+                        except OSError:
+                            logger.warning(f"Viewer output dir {html_preview_dir_viewer_in_cwd} not empty or other error, not removed.")
+                            pass # Ignore if not empty or other error
+
+                    # Load content for immediate display from the new persistent location
                     with open(final_html_path_persistent, 'r', encoding='utf-8') as f:
                         html_content = f.read()
                     html_content_escaped = f"<iframe srcdoc='{html.escape(html_content)}' width='100%' height='800px' style='border: 1px solid #ccc;'></iframe>"
@@ -183,7 +183,7 @@ def run_olmocr_on_pdf(pdf_file_obj, target_dim, anchor_len, error_rate, max_cont
                     logger.exception(f"Error moving/reading HTML preview file")
                     html_content_escaped = "<p style='color:orange;'>无法加载 HTML 预览内容。</p>"
             else:
-                logs += f"警告：在 {html_preview_dir_viewer} 中未找到生成的 HTML 预览文件。\n"
+                logs += f"警告：在 {html_preview_dir_viewer_in_cwd} 中未找到生成的 HTML 预览文件。\n" # Updated log message
                 html_content_escaped = "<p style='color:orange;'>未找到 HTML 预览文件。</p>"
         else:
             logs += f"警告：生成 HTML 预览失败。返回码: {viewer_process.returncode}\n"
