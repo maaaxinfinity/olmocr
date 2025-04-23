@@ -200,36 +200,29 @@ def run_olmocr_on_pdf(pdf_file_list, target_dim, anchor_len, error_rate, max_con
                 # Keep processing the rest, just skip HTML for this file
             else:
                  # JSONL file exists, proceed with viewer command
-                viewer_cmd = ["python", "-m", "olmocr.viewer.dolmaviewer", persistent_jsonl_path]
-                logs += f"执行预览生成命令 [{current_file_name}] (工作目录: {GRADIO_WORKSPACE_DIR}): {' '.join(viewer_cmd)}\n"
-                viewer_process = subprocess.run(viewer_cmd, capture_output=True, text=True, check=False, cwd=GRADIO_WORKSPACE_DIR)
+                viewer_cmd = [
+                    "python", "-m", "olmocr.viewer.dolmaviewer",
+                    persistent_jsonl_path,
+                    "--output_dir", PROCESSED_PREVIEW_DIR
+                 ]
+                logs += f"执行预览生成命令 [{current_file_name}] (目标目录: {PROCESSED_PREVIEW_DIR}): {' '.join(viewer_cmd)}\n"
+                viewer_process = subprocess.run(viewer_cmd, capture_output=True, text=True, check=False)
                 logs += f"--- Viewer STDOUT [{current_file_name}] ---\n{viewer_process.stdout}\n--- Viewer STDERR ---\n{viewer_process.stderr}\n"
 
                 if viewer_process.returncode == 0:
-                    html_preview_dir_viewer = os.path.join(GRADIO_WORKSPACE_DIR, "dolma_previews")
                     base_persistent_jsonl_name = os.path.splitext(os.path.basename(persistent_jsonl_path))[0]
-                    viewer_html_files = glob.glob(os.path.join(html_preview_dir_viewer, f"{base_persistent_jsonl_name}*.html")) or glob.glob(os.path.join(html_preview_dir_viewer, "*.html"))
+                    viewer_html_files = glob.glob(os.path.join(PROCESSED_PREVIEW_DIR, f"{base_persistent_jsonl_name}*.html"))
 
                     if viewer_html_files:
-                        viewer_html_path_in_cwd = viewer_html_files[0]
-                        persistent_html_filename = f"{safe_base_name}_preview.html"
-                        final_html_path_persistent = os.path.join(PROCESSED_PREVIEW_DIR, persistent_html_filename)
-                        shutil.move(viewer_html_path_in_cwd, final_html_path_persistent)
-                        logs += f"预览文件已保存到: {final_html_path_persistent}\n"
-                        if os.path.exists(html_preview_dir_viewer):
-                            try: os.rmdir(html_preview_dir_viewer)
-                            except OSError: pass
-
-                        # Load content for immediate display
+                        final_html_path_persistent = viewer_html_files[0]
+                        logs += f"预览文件已在目标目录生成: {final_html_path_persistent}\n"
                         with open(final_html_path_persistent, 'r', encoding='utf-8') as f: html_content = f.read()
                         last_successful_html = f"<iframe srcdoc='{html.escape(html_content)}' width='100%' height='800px' style='border: 1px solid #ccc;'></iframe>"
                         logs += f"[{current_file_name}] HTML 预览内容已加载。\n"
                     else:
-                        logs += f"警告：[{current_file_name}] 未找到生成的 HTML 预览文件。\n"
-                        # Keep the previous last_successful_html
+                        logs += f"警告：[{current_file_name}] 在目标目录 {PROCESSED_PREVIEW_DIR} 中未找到生成的 HTML 预览文件。\n"
                 else:
                     logs += f"警告：[{current_file_name}] 生成 HTML 预览失败。返回码: {viewer_process.returncode}\n"
-                    # Keep the previous last_successful_html
 
             # Update status for successful file
             processed_files_count += 1
