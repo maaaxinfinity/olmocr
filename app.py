@@ -90,30 +90,47 @@ def run_olmocr_on_pdf(pdf_file_obj, target_dim, anchor_len, error_rate, max_cont
         process_start_time = time.time()
         process = subprocess.run(cmd, capture_output=True, text=True, check=False)
         process_duration = time.time() - process_start_time
-        logs += f"--- OLMOCR 日志开始 ---\n"
-        logs += f"--- STDOUT ---\n{process.stdout}\n"
-        logs += f"--- STDERR ---\n{process.stderr}\n"
-        logs += f"--- OLMOCR 日志结束 ---\n"
-        logs += f"OLMOCR 进程完成，耗时: {process_duration:.2f} 秒, 返回码: {process.returncode}\n"
+
+        # <<< --- 添加用于调试的代码 --- >>>
+        logs += f"等待文件系统操作...\\n"
+        logger.info("Waiting briefly for filesystem operations...")
+        time.sleep(2) # 增加延时到 2 秒
+        try:
+            if os.path.exists(olmocr_results_dir):
+                dir_contents = os.listdir(olmocr_results_dir)
+                logs += f"结果目录 ({olmocr_results_dir}) 内容: {dir_contents}\\n"
+                logger.info(f"Contents of results directory ({olmocr_results_dir}): {dir_contents}")
+            else:
+                logs += f"结果目录 ({olmocr_results_dir}) 不存在!\\n"
+                logger.error(f"Results directory ({olmocr_results_dir}) does not exist!")
+        except Exception as list_err:
+            logs += f"列出结果目录 ({olmocr_results_dir}) 时出错: {list_err}\\n"
+            logger.error(f"Error listing results directory ({olmocr_results_dir}): {list_err}")
+        # <<< --- 调试代码结束 --- >>>
+
+        logs += f"--- OLMOCR 日志开始 ---\\n"
+        logs += f"--- STDOUT ---\\n{process.stdout}\\n"
+        logs += f"--- STDERR ---\\n{process.stderr}\\n"
+        logs += f"--- OLMOCR 日志结束 ---\\n"
+        logs += f"OLMOCR 进程完成，耗时: {process_duration:.2f} 秒, 返回码: {process.returncode}\\n"
         logger.info(f"OLMOCR process finished in {process_duration:.2f}s with code {process.returncode}")
         logger.info(f"OLMOCR STDOUT:\n{process.stdout}")
         logger.info(f"OLMOCR STDERR:\n{process.stderr}")
 
-
         if process.returncode != 0:
             logger.error(f"OLMOCR failed with code {process.returncode}. stderr: {process.stderr}")
-            logs += f"\n错误：OLMOCR 处理失败，请查看日志获取详细信息。返回码: {process.returncode}\n"
+            logs += f"\n错误：OLMOCR 处理失败，请查看日志获取详细信息。返回码: {process.returncode}\\n"
             return extracted_text, logs, "<p style='color:red;'>处理失败，请检查日志。</p>"
 
         # 5. Find and Process Result File (JSONL)
         jsonl_files = glob.glob(os.path.join(olmocr_results_dir, "output_*.jsonl"))
         if not jsonl_files:
             logger.error(f"Could not find output JSONL file in {olmocr_results_dir}")
-            logs += f"\n错误：在 {olmocr_results_dir} 中未找到 OLMOCR 输出文件 (output_*.jsonl)。\n"
+            logs += f"\n错误：在 {olmocr_results_dir} 中未找到 OLMOCR 输出文件 (output_*.jsonl)。\\n"
             return extracted_text, logs, "<p style='color:red;'>未找到结果文件。</p>"
 
         jsonl_output_path = jsonl_files[0]
-        logs += f"找到结果文件: {jsonl_output_path}\n"
+        logs += f"找到结果文件: {jsonl_output_path}\\n"
         logger.info(f"Found result file: {jsonl_output_path}")
 
         try:
@@ -122,12 +139,12 @@ def run_olmocr_on_pdf(pdf_file_obj, target_dim, anchor_len, error_rate, max_cont
                 for line in f:
                     if line.strip():
                         data = json.loads(line)
-                        temp_extracted_text += data.get("text", "") + "\n\n"
+                        temp_extracted_text += data.get("text", "") + "\\n\\n"
             extracted_text = temp_extracted_text.strip() # Update the main variable
-            logs += "成功提取文本内容。\n"
+            logs += "成功提取文本内容。\\n"
             logger.info("Successfully extracted text content.")
         except Exception as e:
-            logs += f"解析结果文件时出错: {e}\n"
+            logs += f"解析结果文件时出错: {e}\\n"
             logger.exception(f"Error parsing result file {jsonl_output_path}")
             return extracted_text, logs, "<p style='color:red;'>解析结果文件出错。</p>"
 
@@ -138,45 +155,45 @@ def run_olmocr_on_pdf(pdf_file_obj, target_dim, anchor_len, error_rate, max_cont
         shutil.copy(jsonl_output_path, temp_jsonl_for_preview)
 
         viewer_cmd = ["python", "-m", "olmocr.viewer.dolmaviewer", temp_jsonl_for_preview]
-        logs += f"执行预览生成命令: {' '.join(viewer_cmd)}\n"
+        logs += f"执行预览生成命令: {' '.join(viewer_cmd)}\\n"
         logger.info(f"Executing viewer command: {' '.join(viewer_cmd)}")
 
         viewer_process = subprocess.run(viewer_cmd, capture_output=True, text=True, check=False, cwd=preview_base_dir)
 
-        logs += f"--- Viewer STDOUT ---\n{viewer_process.stdout}\n"
-        logs += f"--- Viewer STDERR ---\n{viewer_process.stderr}\n"
+        logs += f"--- Viewer STDOUT ---\\n{viewer_process.stdout}\\n"
+        logs += f"--- Viewer STDERR ---\\n{viewer_process.stderr}\\n"
 
         if viewer_process.returncode == 0:
             html_preview_dir = os.path.join(preview_base_dir, "dolma_previews")
             html_files = glob.glob(os.path.join(html_preview_dir, f"{os.path.splitext(input_pdf_filename)[0]}*.html"))
             if html_files:
                 html_preview_path_final = html_files[0]
-                logs += f"成功生成预览文件: {html_preview_path_final}\n"
+                logs += f"成功生成预览文件: {html_preview_path_final}\\n"
                 logger.info(f"Successfully generated preview file: {html_preview_path_final}")
                 try:
                     with open(html_preview_path_final, 'r', encoding='utf-8') as f:
                         html_content = f.read()
                     # Escape for srcdoc and wrap in iframe
                     html_content_escaped = f"<iframe srcdoc='{html.escape(html_content)}' width='100%' height='800px' style='border: 1px solid #ccc;'></iframe>"
-                    logs += "HTML 预览内容已加载。\n"
+                    logs += "HTML 预览内容已加载。\\n"
                     logger.info("HTML preview content loaded.")
                 except Exception as e:
-                    logs += f"读取 HTML 预览文件时出错: {e}\n"
+                    logs += f"读取 HTML 预览文件时出错: {e}\\n"
                     logger.exception(f"Error reading HTML preview file {html_preview_path_final}")
                     html_content_escaped = "<p style='color:orange;'>无法加载 HTML 预览内容。</p>"
             else:
-                logs += "警告：未找到生成的 HTML 预览文件。\n"
+                logs += "警告：未找到生成的 HTML 预览文件。\\n"
                 logger.warning(f"Could not find generated HTML file in {html_preview_dir}")
                 html_content_escaped = "<p style='color:orange;'>未找到 HTML 预览文件。</p>"
         else:
-            logs += f"警告：生成 HTML 预览失败。返回码: {viewer_process.returncode}\n"
+            logs += f"警告：生成 HTML 预览失败。返回码: {viewer_process.returncode}\\n"
             logger.warning(f"dolmaviewer failed with code {viewer_process.returncode}")
             html_content_escaped = "<p style='color:orange;'>生成 HTML 预览失败。</p>"
 
         return extracted_text, logs, html_content_escaped
 
     except Exception as e:
-        error_message = f"发生意外错误: {e}\n"
+        error_message = f"发生意外错误: {e}\\n"
         logs += error_message
         logger.exception("An unexpected error occurred during OLMOCR processing.")
         return "", logs, f"<p style='color:red;'>发生意外错误: {e}</p>"
