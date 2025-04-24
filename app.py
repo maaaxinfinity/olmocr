@@ -161,9 +161,26 @@ def run_olmocr_on_pdf(pdf_file_list, target_dim, anchor_len, error_rate, max_con
             # 5. Process Result File (JSONL)
             jsonl_files_temp = glob.glob(os.path.join(olmocr_results_dir, "output_*.jsonl"))
             if not jsonl_files_temp:
-                raise FileNotFoundError(f"在临时目录 {olmocr_results_dir} 中未找到 OLMOCR 输出文件。")
+                # This case means OLMOCR didn't even create an output file structure
+                logs += f"**错误**：在临时目录 {olmocr_results_dir} 中未找到 OLMOCR 输出 JSONL 文件。\n"
+                logger.error(f"[{current_file_name}] OLMOCR output JSONL file not found in {olmocr_results_dir}.")
+                raise FileNotFoundError(f"在临时目录 {olmocr_results_dir} 中未找到 OLMOCR 输出文件。") # Re-raise to trigger the main exception handler
 
-            temp_jsonl_path = jsonl_files_temp[0]
+            temp_jsonl_path = jsonl_files_temp[0] # Assume only one
+
+            # <<< START: NEW CHECK - Verify if the found JSONL file is empty >>>
+            if os.path.getsize(temp_jsonl_path) == 0:
+                logs += f"**警告**：OLMOCR 为 {current_file_name} 生成了空的 JSONL 文件 ({os.path.basename(temp_jsonl_path)})。可能由于处理错误（请查看 OLMOCR 日志）。跳过此文件的文本提取和 HTML 预览。\n"
+                logger.warning(f"[{current_file_name}] OLMOCR generated an empty JSONL file: {temp_jsonl_path}. Skipping text/HTML steps.")
+                # Update status and continue to the next file in the main loop
+                processed_files_count += 1 # Count as processed but with warnings.
+                current_file_status_md = f"### ✓ 已完成 (有警告) ({i+1}/{total_files}):\n{current_file_name}"
+                # Yield status but don't update text/HTML outputs
+                yield all_extracted_text, logs, last_successful_html, list_processed_files(), current_file_status_md
+                continue # Skip to the next file in the loop
+            # <<< END: NEW CHECK >>>
+
+            # --- If file exists and is not empty, proceed ---
             persistent_jsonl_filename = f"{safe_base_name}_output.jsonl"
             persistent_jsonl_path = os.path.join(PROCESSED_JSONL_DIR, persistent_jsonl_filename)
             shutil.copy(temp_jsonl_path, persistent_jsonl_path)
@@ -172,131 +189,119 @@ def run_olmocr_on_pdf(pdf_file_list, target_dim, anchor_len, error_rate, max_con
 
             # Extract text
             file_extracted_text = ""
-            with open(persistent_jsonl_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        data = json.loads(line)
-                        page_text = data.get("text")
-                        if page_text is not None:
-                             file_extracted_text += page_text + "\n\n"
-            all_extracted_text += f"===== 文件: {current_file_name} =====\n\n" + file_extracted_text.strip() + "\n\n"
-            logs += f"成功提取 [{current_file_name}] 文本内容。\n"
-            # Yield with updated combined text
+            try: # Add try-except around file reading
+                with open(persistent_jsonl_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            data = json.loads(line)
+                            page_text = data.get("text")
+                            if page_text is not None:
+                                 file_extracted_text += page_text + "\n\n"
+                all_extracted_text += f"===== 文件: {current_file_name} =====\n\n" + file_extracted_text.strip() + "\n\n"
+                logs += f"成功提取 [{current_file_name}] 文本内容。\n"
+            except Exception as read_err:
+                 logs += f"**错误**：读取 JSONL 文件 {persistent_jsonl_path} 时出错: {read_err}\n"
+                 logger.error(f"[{current_file_name}] Error reading JSONL {persistent_jsonl_path}: {read_err}")
+                 # Decide how to handle this - maybe skip HTML too? For now, just log.
+
+            # Yield with updated combined text (even if HTML fails later)
             yield all_extracted_text, logs, last_successful_html, list_processed_files(), current_file_status_md
 
             # 6. Generate HTML Preview
-            # <<< --- START: Add check/wait for JSONL file --- >>>
-            max_wait_time = 10 # Maximum seconds to wait for the JSONL file
-            wait_interval = 0.5 # Seconds between checks
-            start_wait_time = time.time()
-            jsonl_ready = False
-            while time.time() - start_wait_time < max_wait_time:
-                if os.path.exists(persistent_jsonl_path) and os.path.getsize(persistent_jsonl_path) > 0: # Check existence and non-empty
-                    logs += f"确认 JSONL 文件存在: {persistent_jsonl_path}\n"
-                    logger.info(f"[{current_file_name}] Confirmed JSONL file exists: {persistent_jsonl_path}")
-                    jsonl_ready = True
-                    break
-                else:
-                    logs += f"等待 JSONL 文件 ({persistent_jsonl_path}) 可用...\n"
-                    logger.debug(f"[{current_file_name}] Waiting for JSONL file: {persistent_jsonl_path}")
-                    time.sleep(wait_interval)
+            # <<< --- REMOVED: Wait loop for JSONL file --- >>>
+            # The check for empty file is done before copy now.
 
-            if not jsonl_ready:
-                logs += f"**错误**：等待 JSONL 文件 {persistent_jsonl_path} 超时 ({max_wait_time}秒)。跳过 HTML 预览生成。\n"
-                logger.error(f"[{current_file_name}] Timeout waiting for JSONL file: {persistent_jsonl_path}. Skipping viewer.")
-                # Keep processing the rest, just skip HTML for this file
-            else:
-                 # JSONL file exists, proceed with viewer command
-                viewer_cmd = [
-                    "python", "-m", "olmocr.viewer.dolmaviewer",
-                    persistent_jsonl_path,
-                    "--output_dir", PROCESSED_PREVIEW_DIR
-                 ]
-                logs += f"执行预览生成命令 [{current_file_name}] (目标目录: {PROCESSED_PREVIEW_DIR}): {' '.join(viewer_cmd)}\n"
-                viewer_process = subprocess.run(viewer_cmd, capture_output=True, text=True, check=False)
-                logs += f"--- Viewer STDOUT [{current_file_name}] ---\n{viewer_process.stdout}\n--- Viewer STDERR ---\n{viewer_process.stderr}\n"
+            # Proceed with viewer command directly as the file should exist and be non-empty
+            viewer_cmd = [
+                "python", "-m", "olmocr.viewer.dolmaviewer",
+                persistent_jsonl_path,
+                "--output_dir", PROCESSED_PREVIEW_DIR
+             ]
+            logs += f"执行预览生成命令 [{current_file_name}] (目标目录: {PROCESSED_PREVIEW_DIR}): {' '.join(viewer_cmd)}\n"
+            viewer_process = subprocess.run(viewer_cmd, capture_output=True, text=True, check=False)
+            logs += f"--- Viewer STDOUT [{current_file_name}] ---\n{viewer_process.stdout}\n--- Viewer STDERR ---\n{viewer_process.stderr}\n"
 
-                if viewer_process.returncode == 0:
-                    # <<< START: Construct expected HTML filename and wait >>>
-                    html_found = False
-                    final_html_path_persistent = None
-                    try:
-                        # Construct the expected filename based on the PDF path
-                        # Assumes app runs from the parent dir of GRADIO_WORKSPACE_DIR
-                        path_for_html_name = persistent_pdf_path.replace(os.sep, '_').replace('.', '_')
-                        expected_html_filename = path_for_html_name + ".html"
-                        expected_html_path = os.path.join(PROCESSED_PREVIEW_DIR, expected_html_filename)
-                        logs += f"调试：预期的 HTML 文件名: {expected_html_filename}\n"
-                        logger.info(f"[{current_file_name}] Expected HTML filename: {expected_html_filename}")
+            if viewer_process.returncode == 0:
+                # <<< START: Construct expected HTML filename and wait >>>
+                html_found = False
+                final_html_path_persistent = None
+                try:
+                    # Construct the expected filename based on the PDF path
+                    # Assumes app runs from the parent dir of GRADIO_WORKSPACE_DIR
+                    path_for_html_name = persistent_pdf_path.replace(os.sep, '_').replace('.', '_')
+                    expected_html_filename = path_for_html_name + ".html"
+                    expected_html_path = os.path.join(PROCESSED_PREVIEW_DIR, expected_html_filename)
+                    logs += f"调试：预期的 HTML 文件名: {expected_html_filename}\n"
+                    logger.info(f"[{current_file_name}] Expected HTML filename: {expected_html_filename}")
 
-                        # Wait briefly for the specific file to appear
-                        max_wait_html = 5 # seconds
-                        wait_interval_html = 0.5
-                        start_wait_html = time.time()
-                        while time.time() - start_wait_html < max_wait_html:
-                            if os.path.exists(expected_html_path):
-                                logs += f"确认预期的 HTML 文件存在: {expected_html_path}\n"
-                                logger.info(f"[{current_file_name}] Found expected HTML file: {expected_html_path}")
-                                final_html_path_persistent = expected_html_path
-                                html_found = True
-                                break
-                            time.sleep(wait_interval_html)
+                    # Wait briefly for the specific file to appear
+                    max_wait_html = 5 # seconds
+                    wait_interval_html = 0.5
+                    start_wait_html = time.time()
+                    while time.time() - start_wait_html < max_wait_html:
+                        if os.path.exists(expected_html_path):
+                            logs += f"确认预期的 HTML 文件存在: {expected_html_path}\n"
+                            logger.info(f"[{current_file_name}] Found expected HTML file: {expected_html_path}")
+                            final_html_path_persistent = expected_html_path
+                            html_found = True
+                            break
+                        time.sleep(wait_interval_html)
 
-                        if not html_found:
-                            logs += f"警告：等待预期的 HTML 文件 {expected_html_filename} 超时。\n"
-                            logger.warning(f"[{current_file_name}] Timeout waiting for expected HTML file: {expected_html_filename}")
-
-                    except Exception as name_err:
-                        logs += f"警告：构造或检查预期 HTML 文件名时出错: {name_err}\n"
-                        logger.error(f"[{current_file_name}] Error constructing/checking expected HTML filename: {name_err}")
-                    # <<< END: Construct expected HTML filename and wait >>>
-
-                    # <<< START: Fallback to glob if specific file not found >>>
                     if not html_found:
-                        logs += f"尝试使用 glob 查找 *.html 作为后备方案...\n"
-                        logger.info(f"[{current_file_name}] Falling back to glob search for *.html")
-                        try:
-                            # Log directory contents before globbing
-                            dir_contents = os.listdir(PROCESSED_PREVIEW_DIR)
-                            logs += f"调试：后备查找前目录内容 ({PROCESSED_PREVIEW_DIR}): {dir_contents}\n"
-                            logger.info(f"[{current_file_name}] Contents before fallback glob {PROCESSED_PREVIEW_DIR}: {dir_contents}")
+                        logs += f"警告：等待预期的 HTML 文件 {expected_html_filename} 超时。\n"
+                        logger.warning(f"[{current_file_name}] Timeout waiting for expected HTML file: {expected_html_filename}")
 
-                            viewer_html_files = glob.glob(os.path.join(PROCESSED_PREVIEW_DIR, "*.html"))
-                            logs += f"后备查找 *.html 找到: {len(viewer_html_files)} 个文件\n"
-                            if viewer_html_files:
-                                viewer_html_files.sort()
-                                final_html_path_persistent = viewer_html_files[0] # Pick first one
-                                html_found = True
-                                logs += f"后备查找选中 HTML 文件: {final_html_path_persistent}\n"
-                                logger.info(f"[{current_file_name}] Fallback glob found and selected: {final_html_path_persistent}")
+                except Exception as name_err:
+                    logs += f"警告：构造或检查预期 HTML 文件名时出错: {name_err}\n"
+                    logger.error(f"[{current_file_name}] Error constructing/checking expected HTML filename: {name_err}")
+                # <<< END: Construct expected HTML filename and wait >>>
 
-                        except Exception as glob_err:
-                            logs += f"警告：后备 glob 查找 HTML 文件时出错: {glob_err}\n"
-                            logger.error(f"[{current_file_name}] Error during fallback glob search: {glob_err}")
-                    # <<< END: Fallback to glob >>>
+                # <<< START: Fallback to glob if specific file not found >>>
+                if not html_found:
+                    logs += f"尝试使用 glob 查找 *.html 作为后备方案...\n"
+                    logger.info(f"[{current_file_name}] Falling back to glob search for *.html")
+                    try:
+                        # Log directory contents before globbing
+                        dir_contents = os.listdir(PROCESSED_PREVIEW_DIR)
+                        logs += f"调试：后备查找前目录内容 ({PROCESSED_PREVIEW_DIR}): {dir_contents}\n"
+                        logger.info(f"[{current_file_name}] Contents before fallback glob {PROCESSED_PREVIEW_DIR}: {dir_contents}")
 
-                    # Now check if we found an HTML file either way
-                    if html_found and final_html_path_persistent:
-                        # File should already be in the correct location
-                        # Sort to get a predictable file if multiple exist, e.g., alphabetically
-                        # viewer_html_files.sort()
-                        # final_html_path_persistent = viewer_html_files[0] # Pick the first one
-                        # logs += f"预览文件已在目标目录生成，选用: {final_html_path_persistent}\n"
+                        viewer_html_files = glob.glob(os.path.join(PROCESSED_PREVIEW_DIR, "*.html"))
+                        logs += f"后备查找 *.html 找到: {len(viewer_html_files)} 个文件\n"
+                        if viewer_html_files:
+                            viewer_html_files.sort()
+                            final_html_path_persistent = viewer_html_files[0] # Pick first one
+                            html_found = True
+                            logs += f"后备查找选中 HTML 文件: {final_html_path_persistent}\n"
+                            logger.info(f"[{current_file_name}] Fallback glob found and selected: {final_html_path_persistent}")
 
-                        # Load content for immediate display
-                        try:
-                            with open(final_html_path_persistent, 'r', encoding='utf-8') as f: html_content = f.read()
-                            last_successful_html = f"<iframe srcdoc='{html.escape(html_content)}' width='100%' height='800px' style='border: 1px solid #ccc;'></iframe>"
-                            logs += f"[{current_file_name}] HTML 预览内容已加载。\n"
-                        except Exception as read_err:
-                            logs += f"错误：无法读取最终 HTML 文件 {final_html_path_persistent}: {read_err}\n"
-                            logger.error(f"[{current_file_name}] Failed to read final HTML file {final_html_path_persistent}: {read_err}")
-                            # Keep previous preview if read fails
-                    else:
-                        logs += f"警告：[{current_file_name}] 在目标目录 {PROCESSED_PREVIEW_DIR} 中最终未找到或选中任何 HTML 预览文件。\n"
-                        # Keep the previous last_successful_html
+                    except Exception as glob_err:
+                        logs += f"警告：后备 glob 查找 HTML 文件时出错: {glob_err}\n"
+                        logger.error(f"[{current_file_name}] Error during fallback glob search: {glob_err}")
+                # <<< END: Fallback to glob >>>
+
+                # Now check if we found an HTML file either way
+                if html_found and final_html_path_persistent:
+                    # File should already be in the correct location
+                    # Sort to get a predictable file if multiple exist, e.g., alphabetically
+                    # viewer_html_files.sort()
+                    # final_html_path_persistent = viewer_html_files[0] # Pick the first one
+                    # logs += f"预览文件已在目标目录生成，选用: {final_html_path_persistent}\n"
+
+                    # Load content for immediate display
+                    try:
+                        with open(final_html_path_persistent, 'r', encoding='utf-8') as f: html_content = f.read()
+                        last_successful_html = f"<iframe srcdoc='{html.escape(html_content)}' width='100%' height='800px' style='border: 1px solid #ccc;'></iframe>"
+                        logs += f"[{current_file_name}] HTML 预览内容已加载。\n"
+                    except Exception as read_err:
+                        logs += f"错误：无法读取最终 HTML 文件 {final_html_path_persistent}: {read_err}\n"
+                        logger.error(f"[{current_file_name}] Failed to read final HTML file {final_html_path_persistent}: {read_err}")
+                        # Keep previous preview if read fails
                 else:
-                    logs += f"警告：[{current_file_name}] 生成 HTML 预览失败。返回码: {viewer_process.returncode}\n"
+                    logs += f"警告：[{current_file_name}] 在目标目录 {PROCESSED_PREVIEW_DIR} 中最终未找到或选中任何 HTML 预览文件。\n"
+                    # Keep the previous last_successful_html
+            else:
+                logs += f"警告：[{current_file_name}] 生成 HTML 预览失败。返回码: {viewer_process.returncode}\n"
 
             # Update status for successful file
             processed_files_count += 1
