@@ -513,19 +513,29 @@ def export_combined_archive(export_format):
         generated_files = glob.glob(os.path.join(export_temp_dir, f"*.{export_format}"))
         for gen_file_path in generated_files:
             base_name = os.path.splitext(os.path.basename(gen_file_path))[0]
-            # Assume HTML name convention: base_name + "_preview.html"
-            html_file_name = f"{base_name}_preview.html"
+            # <<< START: Construct expected HTML filename based on presumed PDF path >>>
+            # Assume the original PDF had the same base_name and was in PROCESSED_PDF_DIR
+            presumed_pdf_path = os.path.join(PROCESSED_PDF_DIR, base_name + ".pdf")
+            # Construct the HTML filename using the dolmaviewer convention
+            expected_html_filename = presumed_pdf_path.replace(os.sep, '_').replace('.', '_') + ".html"
+            logger.info(f"Trying to find HTML file: {expected_html_filename} for {gen_file_path}")
+            # <<< END: Construct expected HTML filename >>>
+
+            # Use the constructed expected filename
+            html_file_name = expected_html_filename # Assign to the variable used later
             html_src_path = os.path.join(PROCESSED_PREVIEW_DIR, html_file_name)
+
             if os.path.exists(html_src_path):
-                html_dest_path = os.path.join(export_temp_dir, html_file_name)
+                html_dest_path = os.path.join(export_temp_dir, html_file_name) # Use correct name for destination too
                 try:
                     shutil.copy(html_src_path, html_dest_path)
                     copied_html_count += 1
+                    logger.info(f"Copied HTML: {html_file_name}")
                 except Exception as copy_e:
                     logger.warning(f"无法复制 HTML 文件 {html_src_path}: {copy_e}")
                     status += f"\n警告：无法复制 {html_file_name}"
             else:
-                 logger.warning(f"未找到对应的 HTML 文件: {html_file_name}")
+                 logger.warning(f"未找到对应的 HTML 文件: {html_file_name} at path {html_src_path}")
                  status += f"\n警告：未找到 {html_file_name}"
 
         status += f"\n已复制 {copied_html_count} 个 HTML 文件。"
