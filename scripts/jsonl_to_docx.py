@@ -4,6 +4,7 @@ import json
 import os
 import glob
 import logging
+import re
 from docx import Document
 from docx.shared import Pt
 
@@ -23,6 +24,21 @@ def parse_args():
         help="Local directory to store output .docx files.",
     )
     return parser.parse_args()
+
+def sanitize_for_xml(text):
+    """
+    Removes characters that are invalid in XML 1.0, except for tab, newline, and carriage return.
+    Also removes null bytes.
+    """
+    if not isinstance(text, str):
+        return text # Return as is if not a string
+
+    # Remove null bytes explicitly
+    text = text.replace('\x00', '')
+
+    # Regex to match invalid XML characters (control characters excluding \t, \n, \r)
+    invalid_xml_chars_re = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x84\x86-\x9F]')
+    return invalid_xml_chars_re.sub('', text)
 
 def main():
     args = parse_args()
@@ -67,8 +83,8 @@ def main():
 
                         if text_content:
                             # Add paragraph for each non-empty page text
-                            # Replace multiple newlines with single ones maybe? Or keep as is.
-                            document.add_paragraph(text_content)
+                            sanitized_content = sanitize_for_xml(text_content)
+                            document.add_paragraph(sanitized_content)
                             # Add a page break after each page's content? Optional.
                             # document.add_page_break()
 
