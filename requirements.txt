@@ -1,4 +1,9 @@
-Flask==2.3.3
+Flask>=2.0
 Werkzeug==2.3.7
 requests==2.32.3
-gunicorn==21.2.0 
+gunicorn==21.2.0
+# Add pynvml if GPU monitoring is needed and available
+# pynvml>=11.0.0
+# Add other dependencies if the conversion scripts require them
+# e.g., python-docx
+# e.g., markdown 
