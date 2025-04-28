@@ -9,6 +9,7 @@ import logging
 import zipfile
 import html
 import psutil # Added for system stats
+import platform # Added for OS check
 try:
     import pynvml
     pynvml.nvmlInit()
@@ -252,13 +253,55 @@ def get_system_status():
     # GPU Info (using existing function)
     status['gpu'] = get_gpu_stats() # This already returns a dict with an 'error' key if failed
 
-    # NUMA Info (Placeholder/Hint)
-    # Getting detailed NUMA info is OS-specific and complex.
-    # On Linux, you might use commands like 'lscpu' or 'numactl --hardware'.
-    # This requires running external commands and parsing output.
-    status['numa'] = {
-        "info": "NUMA information requires OS-specific tools (e.g., lscpu/numactl on Linux) and is not directly provided by this API endpoint."
-    }
+    # NUMA Info
+    numa_info = {}
+    if platform.system() == "Linux":
+        try:
+            # Try to run numactl to get hardware info
+            process = subprocess.run(
+                ["numactl", "--hardware"],
+                capture_output=True,
+                text=True,
+                check=False, # Don't raise exception on non-zero exit
+                timeout=5 # Add a timeout
+            )
+            if process.returncode == 0:
+                numa_info["available"] = True
+                numa_info["raw_output"] = process.stdout
+                # Basic parsing attempt (Example - might need adjustments)
+                try:
+                    lines = process.stdout.strip().split('\n')
+                    nodes_line = next((line for line in lines if line.startswith("available:")), None)
+                    if nodes_line:
+                        numa_info["nodes_summary"] = nodes_line
+                        # Extract number of nodes if possible (very basic)
+                        parts = nodes_line.split()
+                        if len(parts) >= 2 and parts[1].isdigit():
+                             numa_info["node_count"] = int(parts[1])
+                    else:
+                        numa_info["parsing_notes"] = "Could not find 'available:' line in output."
+                except Exception as parse_err:
+                    numa_info["parsing_error"] = f"Error parsing numactl output: {parse_err}"
+            else:
+                numa_info["available"] = False
+                numa_info["error"] = f"'numactl --hardware' command failed with code {process.returncode}. STDERR: {process.stderr.strip()}"
+                if process.returncode == 127: # Often means command not found
+                     numa_info["error"] += " (Is numactl installed?)"
+
+        except FileNotFoundError:
+            numa_info["available"] = False
+            numa_info["error"] = "'numactl' command not found. Is it installed and in PATH?"
+        except subprocess.TimeoutExpired:
+            numa_info["available"] = False
+            numa_info["error"] = "'numactl --hardware' command timed out."
+        except Exception as e:
+            numa_info["available"] = False
+            numa_info["error"] = f"Error running numactl: {e}"
+    else:
+        numa_info["available"] = False
+        numa_info["info"] = f"NUMA details via numactl are only attempted on Linux. Current OS: {platform.system()}"
+
+    status['numa'] = numa_info
 
     return status
 
