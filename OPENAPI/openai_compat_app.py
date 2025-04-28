@@ -239,14 +239,10 @@ def chat_completions():
                          "finish_reason": "error"
                      }]
                  }
-                # Yield error chunk if possible
                 try:
                     yield format_sse(error_chunk)
                 except Exception as format_e:
                      logger.error(f"Failed to format/yield final error chunk: {format_e}")
-            finally:
-                # Always end the stream
-                yield format_sse("[DONE]")
 
         return Response(stream_with_context(generate_stream()), mimetype='text/event-stream')
 
