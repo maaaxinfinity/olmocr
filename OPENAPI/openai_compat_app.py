@@ -58,8 +58,14 @@ def chat_completions():
     try:
         data = request.get_json()
         if not data:
+            logger.warning(f"Received request with invalid/empty JSON payload.")
             return jsonify({"error": "Invalid JSON payload"}), 400
+        # Log the received payload
+        logger.info(f"Received /v1/chat/completions request data: {json.dumps(data)}")
+        # Print the received payload to console
+        print(f"---\n[INFO] Received Request Body:\n{json.dumps(data, indent=2)}\n---")
     except Exception as e:
+         logger.error(f"Failed to parse JSON payload: {e}", exc_info=True)
          return jsonify({"error": f"Failed to parse JSON payload: {e}"}), 400
 
     # --- Extract required custom field and standard fields ---
