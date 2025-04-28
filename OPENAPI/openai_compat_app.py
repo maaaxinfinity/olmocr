@@ -104,7 +104,7 @@ def chat_completions():
             }
             def fixed_stream():
                 yield format_sse(delta_chunk)
-                yield format_sse("[DONE]")
+                #yield format_sse("[DONE]")
             return Response(stream_with_context(fixed_stream()), mimetype='text/event-stream')
         else:
             # Send fixed reply as a standard non-stream response
