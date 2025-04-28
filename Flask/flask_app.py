@@ -64,30 +64,16 @@ def start_processing():
     # --- Parameter Handling with Modes ---
     mode = request.form.get('mode', 'normal')
     params = {}
-    required_params_normal = ['target_dim', 'anchor_len', 'error_rate', 'max_context', 'max_retries']
-    required_params_fast = ['target_dim', 'anchor_len', 'max_context']
-    missing_params = []
-
     if mode == 'fast':
-        params['error_rate'] = 0.05 # Fast mode override
-        params['max_retries'] = 5    # Fast mode override
-        # Check required params for fast mode
-        for p in required_params_fast:
-            value = request.form.get(p)
-            if value is None:
-                missing_params.append(p)
-            else:
-                try:
-                    # Attempt conversion based on expected type (adjust if needed)
-                    if p in ['target_dim', 'anchor_len', 'max_context']:
-                        params[p] = int(value)
-                    # Add float conversion if other params were required
-                    # elif p in [...]:
-                    #    params[p] = float(value)
-                except ValueError:
-                    return jsonify({"error": f"Invalid value type for parameter '{p}'. Expected numeric."}), 400
+        # Fast mode: Only requires the file. Use fixed error_rate and retries.
+        # OLMOCR pipeline's internal defaults will be used for other params.
+        params['error_rate'] = 0.03 # Updated requirement
+        params['max_retries'] = 5
+        # No missing params check needed for fast mode anymore
     else: # Normal mode
         # Check required params for normal mode
+        required_params_normal = ['target_dim', 'anchor_len', 'error_rate', 'max_context', 'max_retries']
+        missing_params = [] # Reset missing_params for normal mode
         for p in required_params_normal:
             value = request.form.get(p)
             if value is None:
@@ -102,8 +88,8 @@ def start_processing():
                 except ValueError:
                      return jsonify({"error": f"Invalid value type for parameter '{p}'. Expected numeric."}), 400
 
-    if missing_params:
-        return jsonify({"error": f"Missing required parameters for mode '{mode}': {', '.join(missing_params)}"}), 400
+        if missing_params:
+            return jsonify({"error": f"Missing required parameters for mode '{mode}': {', '.join(missing_params)}"}), 400
 
     # Add fixed worker count
     params['workers'] = 1

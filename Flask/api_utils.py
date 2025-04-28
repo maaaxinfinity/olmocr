@@ -98,18 +98,26 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params):
         # Ensure the results directory will be created by OLMOCR, or create if needed
         # os.makedirs(olmocr_results_dir, exist_ok=True)
 
-        # 3. Construct OLMOCR Command using params dict
+        # 3. Construct OLMOCR Command conditionally based on params
         cmd = [
             "python", "-m", "olmocr.pipeline",
             run_dir,
             "--pdfs", persistent_pdf_path,
-            "--target_longest_image_dim", str(params['target_dim']),
-            "--target_anchor_text_len", str(params['anchor_len']),
-            "--max_page_error_rate", str(params['error_rate']),
-            "--model_max_context", str(params['max_context']),
-            "--max_page_retries", str(params['max_retries']),
-            "--workers", str(params.get('workers', 1))
+            # Required params (should always be present, validated by flask_app)
+            "--max_page_error_rate", str(params['error_rate']), # error_rate is always set (fast or normal)
+            "--max_page_retries", str(params['max_retries']),   # max_retries is always set (fast or normal)
+            # Optional params (only add if present in the dictionary, e.g., for normal mode)
         ]
+        if 'target_dim' in params:
+            cmd.extend(["--target_longest_image_dim", str(params['target_dim'])])
+        if 'anchor_len' in params:
+            cmd.extend(["--target_anchor_text_len", str(params['anchor_len'])])
+        if 'max_context' in params:
+            cmd.extend(["--model_max_context", str(params['max_context'])])
+
+        # Add workers (always present, default 1)
+        cmd.extend(["--workers", str(params.get('workers', 1))])
+
         cmd_str = ' '.join(cmd)
         update_task_status("processing", f"准备执行命令: {cmd_str}")
 
