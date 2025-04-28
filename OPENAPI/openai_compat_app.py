@@ -7,7 +7,7 @@ import logging
 from functools import wraps
 
 # Import the processor function and directories
-from OPENAPI.openai_processor import (
+from openai_processor import (
     process_pdf_openai_style,
     OPENAI_DOCX_OUTPUT_DIR,
     PROCESSED_PREVIEW_DIR # Assuming HTML previews are in the shared location
