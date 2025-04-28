@@ -38,7 +38,7 @@ def ensure_dirs():
 ensure_dirs() # Create directories when the module is imported
 
 # --- Logging Setup ---
-log_format = '%s(asctime)s - %s(name)s - %s(levelname)s - %s(message)s'
+log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 logging.basicConfig(level=logging.INFO, format=log_format)
 logger = logging.getLogger(__name__)
 

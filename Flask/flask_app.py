@@ -7,7 +7,7 @@ import logging
 from functools import wraps # Import wraps for decorator
 
 # Import utility functions from api_utils
-from Flask.api_utils import (
+from api_utils import (
     run_olmocr_on_single_pdf,
     get_gpu_stats,
     clear_temp_workspace,
