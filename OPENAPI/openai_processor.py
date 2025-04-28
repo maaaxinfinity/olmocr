@@ -213,7 +213,10 @@ def process_pdf_openai_style(pdf_filepath):
         log_and_accumulate("处理完成。")
 
         # --- Yield accumulated thoughts --- 
-        yield f"<think>\n{"".join([f'{log}\n' for log in log_accumulator])}</think>"
+        # First, assemble the inner content
+        think_content = "".join([f'{log}\n' for log in log_accumulator])
+        # Then, yield the formatted f-string
+        yield f"<think>\n{think_content}</think>"
 
         # --- Yield final result --- 
         yield {
@@ -230,8 +233,10 @@ def process_pdf_openai_style(pdf_filepath):
         logger.exception(f"[OpenAI:{task_id_for_logs}] Critical error processing file {current_file_name}")
 
         # --- Yield accumulated thoughts before error (if any) --- 
-        # Ensure logs are yielded even on critical failure
-        yield f"<think>\n{"".join([f'{log}\n' for log in log_accumulator])}</think>"
+        # First, assemble the inner content
+        think_content_on_error = "".join([f'{log}\n' for log in log_accumulator])
+        # Then, yield the formatted f-string
+        yield f"<think>\n{think_content_on_error}</think>"
 
         # --- Yield final error result --- 
         yield {"status": "error", "message": error_message}
