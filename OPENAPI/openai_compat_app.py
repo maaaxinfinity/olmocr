@@ -63,27 +63,67 @@ def chat_completions():
          return jsonify({"error": f"Failed to parse JSON payload: {e}"}), 400
 
     # --- Extract required custom field and standard fields ---
-    pdf_file_path = data.get('pdf_file_path') # REQUIRED custom field
-    model_name = data.get('model', 'olmocr-processor') # Cosmetic model name
+    pdf_file_path = data.get('pdf_file_path')
+    model_name = data.get('model', 'olmocr-processor')
     stream = data.get('stream', False)
     request_id = f"chatcmpl-{str(uuid.uuid4())}"
+    created_time = int(time.time())
+    fixed_reply = "请输入PDF文件"
 
+    # --- Handle missing/invalid pdf_file_path --- 
+    should_use_fixed_reply = False
     if not pdf_file_path or not isinstance(pdf_file_path, str):
-        return jsonify({"error": "Missing or invalid 'pdf_file_path' in request body."}), 400
+        logger.warning(f"Request {request_id}: Missing or invalid pdf_file_path.")
+        should_use_fixed_reply = True
+    elif not os.path.isabs(pdf_file_path):
+        logger.warning(f"Request {request_id}: pdf_file_path is not absolute: {pdf_file_path}")
+        should_use_fixed_reply = True # Treat non-absolute paths as invalid for this case
+    elif not os.path.exists(pdf_file_path) or not os.path.isfile(pdf_file_path):
+        logger.warning(f"Request {request_id}: PDF file not found or not a file: {pdf_file_path}")
+        should_use_fixed_reply = True # Treat non-existent files as needing the fixed reply
 
-    # Basic security check on path (adjust based on your deployment constraints)
-    # Example: Ensure it's an absolute path or within an allowed directory
-    if not os.path.isabs(pdf_file_path):
-         # Or resolve relative to a base dir: pdf_file_path = os.path.abspath(os.path.join(ALLOWED_BASE_DIR, pdf_file_path))
-         return jsonify({"error": "'pdf_file_path' must be an absolute path."}), 400
-    # Add more checks if necessary, e.g., ensure file exists before starting
-    if not os.path.exists(pdf_file_path) or not os.path.isfile(pdf_file_path):
-        return jsonify({"error": f"PDF file not found or is not a file: {pdf_file_path}"}), 404
+    if should_use_fixed_reply:
+        if stream:
+            # Send fixed reply as a single chunk stream
+            delta_chunk = {
+                "id": request_id,
+                "object": "chat.completion.chunk",
+                "created": created_time,
+                "model": model_name,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": fixed_reply},
+                    "finish_reason": "stop" # Stop immediately after fixed reply
+                }]
+            }
+            def fixed_stream():
+                yield format_sse(delta_chunk)
+                yield format_sse("[DONE]")
+            return Response(stream_with_context(fixed_stream()), mimetype='text/event-stream')
+        else:
+            # Send fixed reply as a standard non-stream response
+            response_payload = {
+                 "id": request_id,
+                 "object": "chat.completion",
+                 "created": created_time,
+                 "model": model_name,
+                 "choices": [{
+                     "index": 0,
+                     "message": {
+                         "role": "assistant",
+                         "content": fixed_reply,
+                     },
+                     "finish_reason": "stop"
+                 }],
+                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+             }
+            return jsonify(response_payload), 200
+
+    # --- If pdf_file_path is valid, proceed with normal processing --- 
 
     # --- Streaming Response --- 
     if stream:
         def generate_stream():
-            created_time = int(time.time())
             final_result = None
             is_first_chunk = True # To identify the first yield (should be think block)
 
