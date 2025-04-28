@@ -2,6 +2,7 @@ Flask>=2.0
 Werkzeug==2.3.7
 requests==2.32.3
 gunicorn==21.2.0
+psutil>=5.9.0 # For system stats (CPU, Memory)
 # Add pynvml if GPU monitoring is needed and available
 # pynvml>=11.0.0
 # Add other dependencies if the conversion scripts require them

@@ -9,7 +9,7 @@ from functools import wraps # Import wraps for decorator
 # Import utility functions from api_utils
 from api_utils import (
     run_olmocr_on_single_pdf,
-    get_gpu_stats,
+    get_system_status,
     clear_temp_workspace,
     clear_all_processed_data,
     list_preview_files,
@@ -266,22 +266,16 @@ def clear_processed():
         logger.exception("Error clearing processed data.")
         return jsonify({"error": f"Failed to clear processed data: {e}"}), 500
 
-@app.route('/status/gpu', methods=['GET'])
+@app.route('/status/system', methods=['GET'])
 @require_api_key
-def get_gpu_status_api():
-    """Endpoint to get GPU status."""
+def get_system_status_api():
+    """Endpoint to get system status (CPU, Memory, GPU)."""
     try:
-        stats = get_gpu_stats()
-        if "error" in stats:
-            # Return a different status code if monitoring is unavailable vs. an error occurred
-            if "无法初始化 NVML" in stats["error"]:
-                return jsonify(stats), 501 # 501 Not Implemented (or a custom code)
-            else:
-                return jsonify(stats), 500 # Internal Server Error if failed to query
+        stats = get_system_status()
         return jsonify(stats), 200
     except Exception as e:
-        logger.exception("Error getting GPU status.")
-        return jsonify({"error": f"Failed to get GPU status: {e}"}), 500
+        logger.exception("Error getting system status.")
+        return jsonify({"error": f"Failed to get system status: {e}"}), 500
 
 if __name__ == '__main__':
     # Ensure UPLOAD_TEMP_DIR exists before running

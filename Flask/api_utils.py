@@ -8,6 +8,7 @@ import time
 import logging
 import zipfile
 import html
+import psutil # Added for system stats
 try:
     import pynvml
     pynvml.nvmlInit()
@@ -217,6 +218,49 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params):
             except OSError as e:
                 logger.error(f"[Task {task_id}][{current_file_name}] Failed to remove temporary run directory {run_dir}: {e}")
                 update_task_status("warning", f"无法删除临时运行目录 {run_dir}: {e}")
+
+# --- System Status Function ---
+def get_system_status():
+    """Gathers system status including CPU, Memory, and GPU (if available)."""
+    status = {}
+
+    # CPU Info
+    try:
+        # Get CPU usage percentage over 1 second interval
+        status['cpu'] = {
+            "logical_count": psutil.cpu_count(logical=True),
+            "physical_count": psutil.cpu_count(logical=False),
+            "percent_usage": psutil.cpu_percent(interval=0.5) # Use a short interval
+        }
+    except Exception as e:
+        logger.error(f"Failed to get CPU stats: {e}")
+        status['cpu'] = {"error": f"Failed to get CPU stats: {e}"}
+
+    # Memory Info
+    try:
+        mem = psutil.virtual_memory()
+        status['memory'] = {
+            "total_gb": mem.total / (1024**3),
+            "available_gb": mem.available / (1024**3),
+            "used_gb": mem.used / (1024**3),
+            "percent_used": mem.percent
+        }
+    except Exception as e:
+        logger.error(f"Failed to get Memory stats: {e}")
+        status['memory'] = {"error": f"Failed to get Memory stats: {e}"}
+
+    # GPU Info (using existing function)
+    status['gpu'] = get_gpu_stats() # This already returns a dict with an 'error' key if failed
+
+    # NUMA Info (Placeholder/Hint)
+    # Getting detailed NUMA info is OS-specific and complex.
+    # On Linux, you might use commands like 'lscpu' or 'numactl --hardware'.
+    # This requires running external commands and parsing output.
+    status['numa'] = {
+        "info": "NUMA information requires OS-specific tools (e.g., lscpu/numactl on Linux) and is not directly provided by this API endpoint."
+    }
+
+    return status
 
 # --- GPU Stats Function (Copied from app.py) ---
 def get_gpu_stats():
