@@ -5,6 +5,7 @@ import threading
 import time
 import logging
 from functools import wraps # Import wraps for decorator
+from flask_cors import CORS # Add CORS import
 
 # Import utility functions from api_utils
 from api_utils import (
@@ -28,6 +29,7 @@ from api_utils import (
 ensure_dirs()
 
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}}) # Enable CORS for all origins
 
 # Configure logging to match api_utils
 log_format = '%s(asctime)s - %s(name)s - %s(levelname)s - %s(message)s'
