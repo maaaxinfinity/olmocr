@@ -445,7 +445,11 @@ def export_html_archive():
         return {"status": "error", "message": "打包 HTML 文件时出错。", "zip_path": None}
 
 def run_conversion_script(script_name, input_dir, output_dir):
-    script_path = os.path.join("scripts", script_name)
+    # Construct the path relative to the location of api_utils.py
+    # Go up one level ('..'), then into 'scripts'
+    script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", script_name)
+    script_path = os.path.abspath(script_path) # Ensure it's an absolute path for robustness
+
     if not os.path.exists(script_path):
         raise FileNotFoundError(f"转换脚本未找到: {script_path}")
 
