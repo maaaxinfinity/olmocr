@@ -10,6 +10,7 @@ import zipfile
 import html
 import psutil # Added for system stats
 import platform # Added for OS check
+import signal # Needed for checking termination signals
 try:
     import pynvml
     pynvml.nvmlInit()
@@ -65,8 +66,10 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
     current_logs = [] # Keep track of logs for this run to update DB at once
     safe_base_name = "" # Initialize safe_base_name earlier
     start_time = time.time() # Record start time for calculating final duration
+    olmocr_process = None # Initialize process variable
+    actual_processing_start_time = None # Added to store the actual start time
 
-    def update_task_status(status, log_message=None, result_updates=None, stdout=None, stderr=None, error_msg=None):
+    def update_task_status(status, log_message=None, result_updates=None, stdout=None, stderr=None, error_msg=None, process_pid=None, processing_start_time=None):
         """Internal helper to prepare update dict and call the callback."""
         updates = {"status": status}
         if log_message:
@@ -89,13 +92,25 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
             updates["olmocr_stderr"] = stderr
         if error_msg:
              updates["error"] = error_msg
+        
+        if process_pid is not None: # Add pid to updates if provided
+            updates["process_pid"] = process_pid
+        
+        if processing_start_time is not None: # Add processing_start_time if provided
+            updates["processing_start_time"] = processing_start_time
 
         # Calculate and add final elapsed time when task reaches a terminal state
-        terminal_states = ["completed", "failed", "completed_with_warnings"]
+        terminal_states = ["completed", "failed", "completed_with_warnings", "cancelled"] # Add cancelled state
         if status in terminal_states:
-            final_time = time.time() - start_time
-            updates["final_elapsed_time"] = final_time
-            logger.info(f"[Task {task_id}][{current_file_name}] Recorded final elapsed time: {final_time:.2f} seconds")
+             # Calculate final time based on actual processing start if available
+             if actual_processing_start_time:
+                 final_time = time.time() - actual_processing_start_time
+             else:
+                 # Fallback to original start_time if processing didn't actually start
+                 final_time = time.time() - start_time 
+                 logger.warning(f"[Task {task_id}] Calculating final elapsed time based on queue start time because actual processing start time was not recorded.")
+             updates["final_elapsed_time"] = final_time
+             logger.info(f"[Task {task_id}][{current_file_name}] Recorded final elapsed time: {final_time:.2f} seconds (Based on {'processing start' if actual_processing_start_time else 'queue start'})" )
         
         # Call the provided callback function to update the database
         try:
@@ -151,22 +166,74 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
         cmd_str = ' '.join(cmd)
         update_task_status("processing", f"准备执行命令: {cmd_str}")
 
-        # 4. Run OLMOCR
+        # 4. Run OLMOCR using Popen to get PID
         process_start_time = time.time()
-        process = subprocess.run(cmd, capture_output=True, text=True, check=False, encoding='utf-8')
+        try:
+            # Use Popen instead of run
+            olmocr_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', bufsize=1, universal_newlines=True)
+            
+            # Update status with PID immediately and record processing start time
+            current_time = time.time()
+            actual_processing_start_time = current_time # Store locally
+            update_task_status("processing", 
+                               f"OLMOCR 进程已启动 (PID: {olmocr_process.pid})", 
+                               process_pid=olmocr_process.pid, 
+                               processing_start_time=actual_processing_start_time)
+
+            # Communicate to get output and wait for process completion
+            stdout, stderr = olmocr_process.communicate()
+            return_code = olmocr_process.returncode
+            
+        except Exception as popen_err:
+             # Handle potential errors during Popen execution itself
+             error_message = f"执行 OLMOCR Popen 时出错: {popen_err}"
+             logger.exception(f"[Task {task_id}] Error during OLMOCR Popen for {current_file_name}")
+             update_task_status("failed", error_message, error_msg=str(popen_err))
+             return # Exit processing for this file
+        
         process_duration = time.time() - process_start_time
 
-        update_task_status("processing", 
-                           f"OLMOCR 进程完成，耗时: {process_duration:.2f} 秒, 返回码: {process.returncode}",
-                           stdout=process.stdout, stderr=process.stderr)
+        # Log final status based on return code
+        log_msg_base = f"OLMOCR 进程完成，耗时: {process_duration:.2f} 秒, 返回码: {return_code}"
+        
+        # Check for cancellation signal on Linux
+        was_cancelled = False
+        if platform.system() == "Linux" and return_code < 0:
+            try:
+                # Negative return code on Linux often means termination by signal
+                sig = signal.Signals(-return_code)
+                log_msg_base += f" (被信号 {sig.name} 终止)"
+                # Assume cancellation if terminated by common signals
+                if sig in (signal.SIGTERM, signal.SIGINT, signal.SIGKILL):
+                     was_cancelled = True
+                     update_task_status("cancelled", f"OLMOCR 进程被外部信号 ({sig.name}) 终止。", stdout=stdout, stderr=stderr)
+                     # Don't proceed further if cancelled
+                     return 
+            except ValueError:
+                 log_msg_base += f" (被未知信号 {-return_code} 终止)"
+                 # Treat unknown signals potentially as cancellation too for safety
+                 was_cancelled = True
+                 update_task_status("cancelled", f"OLMOCR 进程被未知信号 ({-return_code}) 终止。", stdout=stdout, stderr=stderr)
+                 return
 
-        if process.returncode != 0:
-            raise RuntimeError(f"OLMOCR failed (Code: {process.returncode}). STDERR: {process.stderr}")
+        # If not cancelled, proceed with regular status update
+        if not was_cancelled:
+            update_task_status("processing", log_msg_base, stdout=stdout, stderr=stderr)
+
+        # Raise error only if return code is non-zero AND it wasn't detected as cancelled
+        if return_code != 0 and not was_cancelled:
+            raise RuntimeError(f"OLMOCR failed (Code: {return_code}). STDERR: {stderr}")
+
+        # --- If we reach here, OLMOCR finished successfully (return code 0) ---
 
         # 5. Process Result File (JSONL)
         jsonl_files_temp = glob.glob(os.path.join(olmocr_results_dir, "output_*.jsonl"))
         if not jsonl_files_temp:
-            raise FileNotFoundError(f"在临时目录 {olmocr_results_dir} 中未找到 OLMOCR 输出 JSONL 文件。")
+            # Check if the process might have created the directory but not the file
+            if not os.path.exists(olmocr_results_dir):
+                 raise FileNotFoundError(f"OLMOCR 结果目录 {olmocr_results_dir} 未创建。")
+            else:
+                 raise FileNotFoundError(f"在 OLMOCR 结果目录 {olmocr_results_dir} 中未找到输出 JSONL 文件。检查 OLMOCR 日志了解详情。")
 
         temp_jsonl_path = jsonl_files_temp[0]
 
@@ -236,24 +303,47 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
                 time.sleep(wait_interval_html)
 
             if not html_found_and_renamed:
-                # Log warning if neither long nor simple name found after waiting
-                update_task_status("warning", f"未找到预期的 HTML 文件 (尝试了长名称和短名称 {simple_html_filename})。可能需要手动检查预览目录。")
-                # Consider glob as a last resort, but be cautious
-                # viewer_html_files = glob.glob(os.path.join(PROCESSED_PREVIEW_DIR, "*.html"))
-                # ...
+                update_task_status("warning", f"未找到预期的 HTML 文件...")
         else:
             update_task_status("warning", f"生成 HTML 预览失败。返回码: {viewer_process.returncode}")
 
-        # Mark task as completed successfully (only if no major errors)
-        if get_task_from_db(task_id).get("status") not in ["failed", "completed_with_warnings"]:
-             update_task_status("completed", f"文件 {current_file_name} 处理成功。")
+        # Mark task as completed successfully 
+        # If we reached here without exceptions or specific non-completed statuses set earlier,
+        # then it's considered completed.
+        update_task_status("completed", f"文件 {current_file_name} 处理成功。")
 
     except Exception as e:
         error_message = f"处理文件 {current_file_name} 时发生错误: {e}"
         logger.exception(f"[Task {task_id}] Error processing file {current_file_name}")
+        # Check if the process was running and update wasn't already "cancelled"
+        current_db_status = None
+        try:
+            # Quick check of DB status before overwriting with "failed"
+            # This requires modifying get_task_from_db to be callable here or passing status down
+            # For now, we'll just update to failed, but cancellation takes precedence if it happened.
+            # A better approach might involve a dedicated task state manager.
+            pass # Avoid direct DB call here for simplicity, rely on previous checks
+        except Exception: pass 
+        
+        # Only update to "failed" if not already marked "cancelled" (though cancellation should return early)
+        # This logic might be redundant if cancellation correctly updates and returns.
         update_task_status("failed", error_message, error_msg=str(e))
 
     finally:
+        # Ensure the process is cleaned up if it's still somehow alive (shouldn't be if communicate finished)
+        if olmocr_process and olmocr_process.poll() is None:
+            logger.warning(f"[Task {task_id}] OLMOCR process (PID: {olmocr_process.pid}) still alive after communicate? Attempting termination.")
+            try:
+                olmocr_process.terminate()
+                olmocr_process.wait(timeout=1) # Short wait
+                if olmocr_process.poll() is None:
+                    olmocr_process.kill()
+                    logger.info(f"[Task {task_id}] OLMOCR process (PID: {olmocr_process.pid}) killed.")
+                else:
+                    logger.info(f"[Task {task_id}] OLMOCR process (PID: {olmocr_process.pid}) terminated.")
+            except Exception as term_err:
+                logger.error(f"[Task {task_id}] Error terminating lingering OLMOCR process {olmocr_process.pid}: {term_err}")
+
         # Cleanup the temporary run directory for this file
         if run_dir and os.path.exists(run_dir):
             try:

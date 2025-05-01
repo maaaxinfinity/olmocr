@@ -9,6 +9,8 @@ from flask_cors import CORS # Add CORS import
 import queue # Add queue import
 import sqlite3
 import json # Needed for serializing logs/params
+import platform # Needed for OS check in cancellation
+import psutil # Needed for process termination
 
 # Import utility functions from api_utils
 from api_utils import (
@@ -71,7 +73,9 @@ def init_db():
             error TEXT,
             olmocr_stdout TEXT,
             olmocr_stderr TEXT,
-            final_elapsed_time REAL 
+            final_elapsed_time REAL,
+            process_pid INTEGER,  -- Added column for OLMOCR process PID
+            processing_start_time REAL -- Added column for actual processing start time
         )
         ''')
         conn.commit()
@@ -92,8 +96,10 @@ def add_task_to_db(task_id, task_data):
         cursor.execute('''
         INSERT INTO tasks (
             task_id, status, mode, start_time, original_filename, logs, params, 
-            jsonl_path, html_path, error, olmocr_stdout, olmocr_stderr, final_elapsed_time
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            jsonl_path, html_path, error, olmocr_stdout, olmocr_stderr, final_elapsed_time,
+            process_pid, -- Added column
+            processing_start_time -- Added column
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             task_id, 
             task_data.get('status', 'unknown'), 
@@ -107,7 +113,9 @@ def add_task_to_db(task_id, task_data):
             task_data.get('error'),
             task_data.get('olmocr_stdout'),
             task_data.get('olmocr_stderr'),
-            task_data.get('final_elapsed_time') 
+            task_data.get('final_elapsed_time'),
+            task_data.get('process_pid'), # Added value (will be None initially)
+            task_data.get('processing_start_time') # Added value (will be None initially)
         ))
         conn.commit()
         logger.info(f"Task {task_id} added to database.")
@@ -132,7 +140,8 @@ def update_task_in_db(task_id, updates):
             # (Here keys are controlled internally, so less risk, but good practice)
             valid_columns = ["status", "mode", "start_time", "original_filename", "logs", 
                              "params", "jsonl_path", "html_path", "error", 
-                             "olmocr_stdout", "olmocr_stderr", "final_elapsed_time"]
+                             "olmocr_stdout", "olmocr_stderr", "final_elapsed_time",
+                             "process_pid", "processing_start_time"] # Added process_pid & processing_start_time
             if key in valid_columns:
                 set_clauses.append(f"{key} = ?")
                 # Serialize if it's logs or params
@@ -182,6 +191,12 @@ def get_task_from_db(task_id):
                 logger.warning(f"Could not decode params JSON for task {task_id}")
                 task_dict['params'] = {} # Provide default
                 
+            # Ensure process_pid is included (even if NULL)
+            task_dict['process_pid'] = task_dict.get('process_pid') 
+                
+            # Ensure processing_start_time is included
+            task_dict['processing_start_time'] = task_dict.get('processing_start_time')
+
             # Reconstruct the nested 'result' dict for compatibility if needed
             task_dict['result'] = {
                 'jsonl_path': task_dict.get('jsonl_path'),
@@ -244,6 +259,12 @@ def get_all_tasks_from_db():
                 logger.warning(f"Could not decode params JSON for task {task_dict.get('task_id')}")
                 task_dict['params'] = {} # Provide default
                 
+            # Ensure process_pid is included
+            task_dict['process_pid'] = task_dict.get('process_pid') 
+                
+            # Ensure processing_start_time is included
+            task_dict['processing_start_time'] = task_dict.get('processing_start_time')
+
             # Reconstruct the nested 'result' dict for compatibility
             task_dict['result'] = {
                 'jsonl_path': task_dict.get('jsonl_path'),
@@ -368,7 +389,9 @@ def start_processing():
             "error": None,
             "olmocr_stdout": "",
             "olmocr_stderr": "",
-            "final_elapsed_time": None
+            "final_elapsed_time": None,
+            "process_pid": None,
+            "processing_start_time": None # Added field
         }
 
         # 2. Add task to Database
@@ -408,17 +431,21 @@ def get_task_status(task_id):
     task_info = task_dict # Use the dictionary fetched from DB
 
     # --- Determine elapsed time based on status and stored values ---
-    terminal_states = ["completed", "failed", "completed_with_warnings"]
+    terminal_states = ["completed", "failed", "completed_with_warnings", "cancelled"]
     current_status = task_info.get("status")
     final_elapsed = task_info.get("final_elapsed_time")
-    start_time_val = task_info.get("start_time")
+    processing_start_val = task_info.get("processing_start_time")
 
-    if current_status in terminal_states and final_elapsed is not None:
-        task_info["elapsed_time_seconds"] = final_elapsed
-    elif start_time_val is not None:
-        task_info["elapsed_time_seconds"] = time.time() - start_time_val
-    else:
+    if current_status == 'queued':
         task_info["elapsed_time_seconds"] = 0
+    elif current_status == 'processing' and processing_start_val is not None:
+        task_info["elapsed_time_seconds"] = time.time() - processing_start_val
+    elif current_status in terminal_states and final_elapsed is not None:
+        task_info["elapsed_time_seconds"] = final_elapsed
+    else:
+        task_info["elapsed_time_seconds"] = 0 # Fallback
+        if current_status == 'processing' and processing_start_val is None:
+            logger.warning(f"[Task {task_id}] Status is 'processing' but processing_start_time is missing. Elapsed time set to 0.")
     # --- End of modification ---
 
     # Add queue position (approximation) - this remains based on the live queue
@@ -426,6 +453,12 @@ def get_task_status(task_id):
         task_info["current_queue_size"] = task_queue.qsize()
     except Exception:
         pass 
+
+    # Ensure process_pid is included in the response
+    task_info['process_pid'] = task_dict.get('process_pid') # Already fetched
+
+    # Ensure processing_start_time is included
+    task_info['processing_start_time'] = task_dict.get('processing_start_time')
 
     # Remove raw DB paths from result dict before sending? No, keep for now.
     # del task_info['jsonl_path'] 
@@ -567,21 +600,31 @@ def get_all_tasks():
         # For simplicity, let's return the raw data for now.
         # Frontend can calculate elapsed time for non-terminal states if needed.
         for task_info in all_tasks:
-            terminal_states = ["completed", "failed", "completed_with_warnings"]
+            terminal_states = ["completed", "failed", "completed_with_warnings", "cancelled"]
             current_status = task_info.get("status")
             final_elapsed = task_info.get("final_elapsed_time")
-            start_time_val = task_info.get("start_time")
+            processing_start_val = task_info.get("processing_start_time")
 
-            if current_status in terminal_states and final_elapsed is not None:
-                task_info["elapsed_time_seconds"] = final_elapsed
-            elif start_time_val is not None:
-                task_info["elapsed_time_seconds"] = time.time() - start_time_val
-            else:
+            if current_status == 'queued':
                 task_info["elapsed_time_seconds"] = 0
+            elif current_status == 'processing' and processing_start_val is not None:
+                task_info["elapsed_time_seconds"] = time.time() - processing_start_val
+            elif current_status in terminal_states and final_elapsed is not None:
+                task_info["elapsed_time_seconds"] = final_elapsed
+            else:
+                task_info["elapsed_time_seconds"] = 0 # Fallback
+                if current_status == 'processing' and processing_start_val is None:
+                    logger.warning(f"[Task {task_info.get('task_id')}] Status is 'processing' but processing_start_time is missing. Elapsed time set to 0.")
                 
             # Add current queue size info (optional, maybe less useful here)
             try: task_info["current_queue_size"] = task_queue.qsize() 
             except: pass
+            
+            # Include process_pid
+            task_info['process_pid'] = task_info.get('process_pid')
+            
+            # Ensure processing_start_time is included
+            task_info['processing_start_time'] = task_info.get('processing_start_time')
             
         return jsonify(all_tasks), 200
     except Exception as e:
@@ -594,7 +637,7 @@ def delete_task(task_id):
     """Endpoint to delete a task record from DB and its associated files."""
     logger.info(f"Received request to delete task: {task_id}")
 
-    # 1. Find the task in DB to get file paths
+    # 1. Find the task in DB to get file paths and PID
     task = get_task_from_db(task_id)
     if not task:
         logger.warning(f"Delete request failed: Task {task_id} not found in DB.")
@@ -602,37 +645,119 @@ def delete_task(task_id):
     
     messages = []
     errors = []
+    pid_to_terminate = task.get('process_pid')
+    current_status = task.get('status')
 
-    # 2. Attempt to delete associated files (using paths from DB record)
+    # 2. Attempt to terminate the OLMOCR process (Linux only, if running)
+    process_terminated = False
+    if platform.system() == "Linux" and pid_to_terminate and current_status == 'processing':
+        logger.info(f"[Task {task_id}] Attempting to terminate OLMOCR process with PID: {pid_to_terminate}")
+        try:
+            parent = psutil.Process(pid_to_terminate)
+            children = parent.children(recursive=True)
+            # Terminate children first
+            for child in children:
+                try:
+                    child.terminate()
+                    messages.append(f"Sent SIGTERM to child process {child.pid}")
+                except psutil.NoSuchProcess:
+                    messages.append(f"Child process {child.pid} already exited.")
+                except Exception as child_err:
+                    err_msg = f"Error terminating child process {child.pid}: {child_err}"
+                    logger.error(f"[Task {task_id}] {err_msg}")
+                    errors.append(err_msg)
+
+            # Wait briefly for children to exit
+            _, alive = psutil.wait_procs(children, timeout=0.5)
+            for p in alive:
+                try: 
+                    p.kill(); 
+                    messages.append(f"Sent SIGKILL to lingering child process {p.pid}")
+                except psutil.NoSuchProcess: pass # Already gone
+                except Exception as kill_err: errors.append(f"Error killing child {p.pid}: {kill_err}")
+
+            # Terminate parent
+            try:
+                parent.terminate()
+                messages.append(f"Sent SIGTERM to main process {parent.pid}")
+                try:
+                    parent.wait(timeout=1) # Wait for graceful exit
+                    process_terminated = True
+                    messages.append(f"Main process {parent.pid} terminated gracefully.")
+                except psutil.TimeoutExpired:
+                    logger.warning(f"[Task {task_id}] Main process {parent.pid} did not terminate gracefully, sending SIGKILL.")
+                    parent.kill()
+                    process_terminated = True
+                    messages.append(f"Sent SIGKILL to main process {parent.pid}")
+            except psutil.NoSuchProcess:
+                 messages.append(f"Main process {pid_to_terminate} already exited.")
+                 process_terminated = True # Considered terminated if not found
+            except Exception as parent_err:
+                 err_msg = f"Error terminating main process {pid_to_terminate}: {parent_err}"
+                 logger.error(f"[Task {task_id}] {err_msg}")
+                 errors.append(err_msg)
+
+        except psutil.NoSuchProcess:
+            messages.append(f"Process with PID {pid_to_terminate} not found (already exited?).")
+            process_terminated = True # Consider terminated if not found
+        except psutil.AccessDenied:
+            err_msg = f"Permission denied trying to terminate process {pid_to_terminate}."
+            logger.error(f"[Task {task_id}] {err_msg}")
+            errors.append(err_msg)
+        except Exception as e:
+            err_msg = f"An unexpected error occurred during process termination for PID {pid_to_terminate}: {e}"
+            logger.exception(f"[Task {task_id}] Unexpected termination error.")
+            errors.append(err_msg)
+    elif platform.system() != "Linux":
+         messages.append(f"Skipping process termination: Not on Linux (OS: {platform.system()}).")
+    elif not pid_to_terminate:
+         messages.append(f"Skipping process termination: PID not found in task record.")
+    elif current_status != 'processing':
+         messages.append(f"Skipping process termination: Task status is '{current_status}', not 'processing'.")
+
+    # 3. Update Task Status in DB to 'cancelled' if termination was attempted or successful
+    if process_terminated or (platform.system() == "Linux" and pid_to_terminate and current_status == 'processing'): # Mark cancelled if termination was attempted
+        try:
+            update_task_in_db(task_id, {"status": "cancelled", "error": "Task cancelled by user request.", "process_pid": None}) # Clear PID after cancellation attempt
+            messages.append(f"Updated task {task_id} status to 'cancelled' in database.")
+        except Exception as db_err:
+            err_msg = f"Failed to update task {task_id} status to cancelled in DB: {db_err}"
+            logger.error(f"[Task {task_id}] {err_msg}")
+            errors.append(err_msg)
+
+    # 4. Attempt to delete associated files (using paths from DB record)
     html_path = task.get("html_path") # Directly access from dict
     jsonl_path = task.get("jsonl_path") # Directly access from dict
+    # Also consider the original uploaded file in UPLOAD_TEMP_DIR if needed
+    # upload_filename = f"{task_id}_{task.get('original_filename')}" # Reconstruct potential upload name
+    # upload_path = os.path.join(UPLOAD_TEMP_DIR, upload_filename) # Needs sanitization consistency
 
     if html_path and isinstance(html_path, str):
         try:
             if os.path.exists(html_path): os.remove(html_path); msg = f"Deleted HTML file: {html_path}"; logger.info(f"[Task {task_id}] {msg}"); messages.append(msg)
             else: msg = f"HTML file not found on disk: {html_path}"; logger.warning(f"[Task {task_id}] {msg}"); messages.append(msg)
         except OSError as e: err_msg = f"Error deleting HTML file {html_path}: {e}"; logger.error(f"[Task {task_id}] {err_msg}"); errors.append(err_msg)
-    else: messages.append("No HTML file path found in task record.")
+    else: messages.append("No HTML file path found in task record or path invalid.")
 
     if jsonl_path and isinstance(jsonl_path, str):
         try:
             if os.path.exists(jsonl_path): os.remove(jsonl_path); msg = f"Deleted JSONL file: {jsonl_path}"; logger.info(f"[Task {task_id}] {msg}"); messages.append(msg)
             else: msg = f"JSONL file not found on disk: {jsonl_path}"; logger.warning(f"[Task {task_id}] {msg}"); messages.append(msg)
         except OSError as e: err_msg = f"Error deleting JSONL file {jsonl_path}: {e}"; logger.error(f"[Task {task_id}] {err_msg}"); errors.append(err_msg)
-    else: messages.append("No JSONL file path found in task record.")
+    else: messages.append("No JSONL file path found in task record or path invalid.")
         
-    # 3. Remove the task entry from the database
-    if delete_task_from_db(task_id):
-        messages.append(f"Removed task record {task_id} from database.")
-    else:
-        # This case means it was already gone from DB, but files might have been deleted
-        errors.append(f"Task record {task_id} was not found in database for deletion (might have been deleted already).")
+    # 5. DO NOT delete the task entry from the database - keep it with 'cancelled' status
+    # if delete_task_from_db(task_id):
+    #     messages.append(f"Removed task record {task_id} from database.")
+    # else:
+    #     errors.append(f"Task record {task_id} was not found in database for deletion (might have been deleted already or failed cancellation update).")
+    messages.append(f"Kept task record {task_id} in database with status 'cancelled'.")
 
-    # 4. Return response
+    # 6. Return response
     if errors:
-        return jsonify({"message": f"Task {task_id} deletion process finished with errors.", "details": messages, "errors": errors}), 200
+        return jsonify({"message": f"Task {task_id} cancellation process finished with errors.", "details": messages, "errors": errors}), 200 # Return 200 even with errors, as action was attempted
     else:
-        return jsonify({"message": f"Task {task_id} deleted successfully.", "details": messages}), 200
+        return jsonify({"message": f"Task {task_id} cancelled successfully (process termination attempted/verified, files cleaned).", "details": messages}), 200
 
 if __name__ == '__main__':
     # Ensure UPLOAD_TEMP_DIR exists before running
