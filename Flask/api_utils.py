@@ -44,48 +44,65 @@ log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 logging.basicConfig(level=logging.INFO, format=log_format)
 logger = logging.getLogger(__name__)
 
-# --- Global Task Tracking (Simple implementation) ---
-# In production, use Redis, Celery, or a database
-tasks = {}
-
 # --- Core Processing Logic (Adapted from app.py) ---
 
-def run_olmocr_on_single_pdf(pdf_filepath, task_id, params):
+def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
     """
-    Runs OLMOCR on a single PDF file and updates the task status.
+    Runs OLMOCR on a single PDF file and updates the task status via callback.
     This function is intended to be run in a separate thread.
 
     Args:
         pdf_filepath (str): Absolute path to the PDF file to process.
         task_id (str): The ID of the task for status updates.
         params (dict): Dictionary containing OLMOCR parameters.
+        update_callback (callable): Function to call for updating task status in DB.
+                                   Expected signature: update_callback(task_id, updates_dict)
     """
     run_dir = None
     persistent_pdf_path = None
     persistent_jsonl_path = None
     current_file_name = os.path.basename(pdf_filepath)
-    logs = [] # Store logs for this specific file
+    current_logs = [] # Keep track of logs for this run to update DB at once
     safe_base_name = "" # Initialize safe_base_name earlier
+    start_time = time.time() # Record start time for calculating final duration
 
-    def update_task_status(status, log_message=None, result=None):
-        tasks[task_id]["status"] = status
+    def update_task_status(status, log_message=None, result_updates=None, stdout=None, stderr=None, error_msg=None):
+        """Internal helper to prepare update dict and call the callback."""
+        updates = {"status": status}
         if log_message:
-            tasks[task_id]["logs"].append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {log_message}")
+            # Append log to current list for this run
+            log_entry = f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {log_message}"
+            current_logs.append(log_entry)
             logger.info(f"[Task {task_id}][{current_file_name}] {log_message}")
-        if result:
-            tasks[task_id]["result"] = result
+            updates["logs"] = json.dumps(current_logs) # Update with full log list (as JSON)
+        
+        if result_updates: # Should be a dict like {'jsonl_path': path, 'html_path': path}
+             # We need to update specific keys, not overwrite the whole result
+            if "jsonl_path" in result_updates:
+                updates["jsonl_path"] = result_updates["jsonl_path"]
+            if "html_path" in result_updates:
+                updates["html_path"] = result_updates["html_path"]
 
-        # --- Add final elapsed time when task reaches a terminal state ---
+        if stdout:
+            updates["olmocr_stdout"] = stdout
+        if stderr:
+            updates["olmocr_stderr"] = stderr
+        if error_msg:
+             updates["error"] = error_msg
+
+        # Calculate and add final elapsed time when task reaches a terminal state
         terminal_states = ["completed", "failed", "completed_with_warnings"]
         if status in terminal_states:
-            # Check if start_time exists before calculation
-            if "start_time" in tasks[task_id]:
-                final_time = time.time() - tasks[task_id]["start_time"]
-                tasks[task_id]["final_elapsed_time"] = final_time
-                logger.info(f"[Task {task_id}][{current_file_name}] Recorded final elapsed time: {final_time:.2f} seconds")
-            else:
-                logger.warning(f"[Task {task_id}][{current_file_name}] Cannot record final elapsed time: start_time missing.")
-        # --- End of addition ---
+            final_time = time.time() - start_time
+            updates["final_elapsed_time"] = final_time
+            logger.info(f"[Task {task_id}][{current_file_name}] Recorded final elapsed time: {final_time:.2f} seconds")
+        
+        # Call the provided callback function to update the database
+        try:
+            update_callback(task_id, updates)
+        except Exception as db_err:
+            logger.error(f"[Task {task_id}] Failed to update task status in DB: {db_err}", exc_info=True)
+            # Continue processing if possible, but status might be stale in DB
 
     update_task_status("processing", f"开始处理文件: {current_file_name}")
 
@@ -139,9 +156,9 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params):
         process = subprocess.run(cmd, capture_output=True, text=True, check=False, encoding='utf-8')
         process_duration = time.time() - process_start_time
 
-        update_task_status("processing", f"OLMOCR 进程完成，耗时: {process_duration:.2f} 秒, 返回码: {process.returncode}")
-        tasks[task_id]['olmocr_stdout'] = process.stdout
-        tasks[task_id]['olmocr_stderr'] = process.stderr
+        update_task_status("processing", 
+                           f"OLMOCR 进程完成，耗时: {process_duration:.2f} 秒, 返回码: {process.returncode}",
+                           stdout=process.stdout, stderr=process.stderr)
 
         if process.returncode != 0:
             raise RuntimeError(f"OLMOCR failed (Code: {process.returncode}). STDERR: {process.stderr}")
@@ -165,8 +182,8 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params):
         persistent_jsonl_filename = f"{safe_base_name}_output.jsonl"
         persistent_jsonl_path = os.path.join(PROCESSED_JSONL_DIR, persistent_jsonl_filename)
         shutil.copy(temp_jsonl_path, persistent_jsonl_path)
-        update_task_status("processing", f"结果 JSONL 文件已保存到: {persistent_jsonl_path}")
-        tasks[task_id]['result']['jsonl_path'] = persistent_jsonl_path
+        update_task_status("processing", f"结果 JSONL 文件已保存到: {persistent_jsonl_path}",
+                           result_updates={"jsonl_path": persistent_jsonl_path})
 
         # 6. Generate HTML Preview
         # Ensure persistent preview directory exists
@@ -202,20 +219,17 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params):
                     try:
                         # Rename the long-named file to the simple name
                         os.rename(long_html_path_expected, simple_html_path)
-                        update_task_status("processing", f"已将 HTML 文件重命名为: {simple_html_path}")
-                        # Store the simple path in results
-                        tasks[task_id]['result']['html_path'] = simple_html_path
+                        update_task_status("processing", f"已将 HTML 文件重命名为: {simple_html_path}",
+                                           result_updates={"html_path": simple_html_path})
                         html_found_and_renamed = True
                         break # Exit loop after successful rename
                     except OSError as rename_err:
                         update_task_status("warning", f"重命名 HTML 文件失败 从 {long_html_path_expected} 到 {simple_html_path}: {rename_err}")
-                        # Optionally store the long path if rename fails?
-                        # tasks[task_id]['result']['html_path'] = long_html_path_expected
                         break # Exit loop even if rename fails to avoid infinite loop
                 # Check if the simple name already exists (e.g., from a previous run or manual intervention)
                 elif os.path.exists(simple_html_path):
-                    update_task_status("processing", f"找到已存在的简洁名称 HTML 文件: {simple_html_path}")
-                    tasks[task_id]['result']['html_path'] = simple_html_path # Assume it's the correct one
+                    update_task_status("processing", f"找到已存在的简洁名称 HTML 文件: {simple_html_path}",
+                                       result_updates={"html_path": simple_html_path})
                     html_found_and_renamed = True
                     break
                     
@@ -231,14 +245,13 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params):
             update_task_status("warning", f"生成 HTML 预览失败。返回码: {viewer_process.returncode}")
 
         # Mark task as completed successfully (only if no major errors)
-        if tasks[task_id]["status"] not in ["failed", "completed_with_warnings"]:
+        if get_task_from_db(task_id).get("status") not in ["failed", "completed_with_warnings"]:
              update_task_status("completed", f"文件 {current_file_name} 处理成功。")
 
     except Exception as e:
         error_message = f"处理文件 {current_file_name} 时发生错误: {e}"
         logger.exception(f"[Task {task_id}] Error processing file {current_file_name}")
-        update_task_status("failed", error_message)
-        tasks[task_id]['error'] = str(e)
+        update_task_status("failed", error_message, error_msg=str(e))
 
     finally:
         # Cleanup the temporary run directory for this file

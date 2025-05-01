@@ -7,6 +7,8 @@ import logging
 from functools import wraps # Import wraps for decorator
 from flask_cors import CORS # Add CORS import
 import queue # Add queue import
+import sqlite3
+import json # Needed for serializing logs/params
 
 # Import utility functions from api_utils
 from api_utils import (
@@ -18,7 +20,6 @@ from api_utils import (
     list_jsonl_files,
     export_html_archive,
     export_combined_archive,
-    tasks, # Import the shared task dictionary
     PROCESSED_PREVIEW_DIR,
     PROCESSED_JSONL_DIR,
     EXPORT_TEMP_DIR_BASE,
@@ -37,6 +38,186 @@ log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 logging.basicConfig(level=logging.INFO, format=log_format)
 logger = logging.getLogger(__name__)
 
+# --- Database Setup ---
+DATABASE_PATH = os.path.join(GRADIO_WORKSPACE_DIR, 'tasks.db')
+
+def get_db_conn():
+    """Establishes a connection to the SQLite database."""
+    # check_same_thread=False is needed because the connection 
+    # might be used by the background worker thread.
+    # For more complex apps, a connection pool or passing 
+    # connection per request/task would be better.
+    conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row # Return rows as dictionary-like objects
+    return conn
+
+def init_db():
+    """Initializes the database and creates the tasks table if it doesn't exist."""
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tasks (
+            task_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            mode TEXT,
+            start_time REAL NOT NULL, 
+            original_filename TEXT,
+            logs TEXT,            -- Store as JSON string
+            params TEXT,          -- Store as JSON string
+            jsonl_path TEXT,
+            html_path TEXT,
+            error TEXT,
+            olmocr_stdout TEXT,
+            olmocr_stderr TEXT,
+            final_elapsed_time REAL 
+        )
+        ''')
+        conn.commit()
+        logger.info(f"Database initialized successfully at {DATABASE_PATH}")
+    except sqlite3.Error as e:
+        logger.error(f"Database initialization failed: {e}", exc_info=True)
+        raise # Reraise the exception to prevent app start if DB fails
+    finally:
+        if conn:
+            conn.close()
+
+def add_task_to_db(task_id, task_data):
+    """Adds a new task record to the database."""
+    conn = None
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        cursor.execute('''
+        INSERT INTO tasks (
+            task_id, status, mode, start_time, original_filename, logs, params, 
+            jsonl_path, html_path, error, olmocr_stdout, olmocr_stderr, final_elapsed_time
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            task_id, 
+            task_data.get('status', 'unknown'), 
+            task_data.get('mode'),
+            task_data.get('start_time', time.time()),
+            task_data.get('original_filename'),
+            json.dumps(task_data.get('logs', [])), # Serialize logs
+            json.dumps(task_data.get('params', {})), # Serialize params
+            task_data.get('result', {}).get('jsonl_path'),
+            task_data.get('result', {}).get('html_path'),
+            task_data.get('error'),
+            task_data.get('olmocr_stdout'),
+            task_data.get('olmocr_stderr'),
+            task_data.get('final_elapsed_time') 
+        ))
+        conn.commit()
+        logger.info(f"Task {task_id} added to database.")
+    except sqlite3.Error as e:
+        logger.error(f"Failed to add task {task_id} to DB: {e}", exc_info=True)
+        # Optionally re-raise or handle specific errors (e.g., UNIQUE constraint)
+    finally:
+        if conn:
+            conn.close()
+
+def update_task_in_db(task_id, updates):
+    """Updates specific fields of a task record in the database."""
+    conn = None
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        
+        set_clauses = []
+        values = []
+        for key, value in updates.items():
+            # Ensure the key is a valid column name to prevent SQL injection risk if keys were dynamic
+            # (Here keys are controlled internally, so less risk, but good practice)
+            valid_columns = ["status", "mode", "start_time", "original_filename", "logs", 
+                             "params", "jsonl_path", "html_path", "error", 
+                             "olmocr_stdout", "olmocr_stderr", "final_elapsed_time"]
+            if key in valid_columns:
+                set_clauses.append(f"{key} = ?")
+                # Serialize if it's logs or params
+                if key in ['logs', 'params'] and not isinstance(value, str):
+                    values.append(json.dumps(value))
+                else:
+                     values.append(value)
+            else:
+                logger.warning(f"Attempted to update invalid column '{key}' for task {task_id}")
+
+        if not set_clauses: # No valid updates provided
+            logger.warning(f"No valid fields to update for task {task_id}")
+            return
+
+        sql = f"UPDATE tasks SET { ', '.join(set_clauses)} WHERE task_id = ?"
+        values.append(task_id)
+        
+        cursor.execute(sql, tuple(values))
+        conn.commit()
+        # logger.debug(f"Updated task {task_id} in DB with fields: {list(updates.keys())}")
+    except sqlite3.Error as e:
+        logger.error(f"Failed to update task {task_id} in DB: {e}", exc_info=True)
+    finally:
+        if conn:
+            conn.close()
+
+def get_task_from_db(task_id):
+    """Retrieves a task record from the database as a dictionary."""
+    conn = None
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
+        row = cursor.fetchone()
+        if row:
+            # Convert row object to a dictionary
+            task_dict = dict(row)
+            # Deserialize JSON fields
+            try:
+                if task_dict.get('logs'): task_dict['logs'] = json.loads(task_dict['logs'])
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(f"Could not decode logs JSON for task {task_id}")
+                task_dict['logs'] = [] # Provide default
+            try:
+                if task_dict.get('params'): task_dict['params'] = json.loads(task_dict['params'])
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(f"Could not decode params JSON for task {task_id}")
+                task_dict['params'] = {} # Provide default
+                
+            # Reconstruct the nested 'result' dict for compatibility if needed
+            task_dict['result'] = {
+                'jsonl_path': task_dict.get('jsonl_path'),
+                'html_path': task_dict.get('html_path')
+            }
+            return task_dict
+        else:
+            return None
+    except sqlite3.Error as e:
+        logger.error(f"Failed to get task {task_id} from DB: {e}", exc_info=True)
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+def delete_task_from_db(task_id):
+    """Deletes a task record from the database."""
+    conn = None
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+        conn.commit()
+        if cursor.rowcount > 0:
+            logger.info(f"Deleted task {task_id} from database.")
+            return True
+        else:
+             logger.warning(f"Attempted to delete task {task_id}, but it was not found in DB.")
+             return False # Indicate task was not found
+    except sqlite3.Error as e:
+        logger.error(f"Failed to delete task {task_id} from DB: {e}", exc_info=True)
+        return False
+    finally:
+        if conn:
+            conn.close()
+# --- End Database Setup & Functions ---
+
 # --- Task Queue Setup ---
 task_queue = queue.Queue()
 MAX_WORKERS = 1 # Limit to 1 concurrent OLMOCR process for now
@@ -48,16 +229,21 @@ def processing_worker():
             logger.info(f"Worker waiting for task... Queue size: {task_queue.qsize()}")
             upload_path, task_id, params = task_queue.get() # Blocks until a task is available
             logger.info(f"Worker picked up task {task_id} for file: {upload_path}")
-            # Run the actual processing function from api_utils
-            run_olmocr_on_single_pdf(upload_path, task_id, params)
+            
+            # --- Pass the DB update function as the callback ---
+            run_olmocr_on_single_pdf(upload_path, task_id, params, update_callback=update_task_in_db)
+            # --- End modification ---
+
             logger.info(f"Worker finished task {task_id}")
             task_queue.task_done() # Signal that the task is complete
         except Exception as e:
-            # Log any unexpected error in the worker itself
-            # Task-specific errors should be handled within run_olmocr_on_single_pdf
             logger.error(f"Error in processing worker: {e}", exc_info=True)
-            # If get() failed or task_done() failed, we might need more robust error handling,
-            # but for now, just log and continue.
+            # If a critical error happens here, the task state in DB might remain 'processing'
+            # Consider adding logic here to update the task to 'failed' in DB
+            try:
+                 update_task_in_db(task_id, {"status": "failed", "error": f"Worker thread error: {e}"})
+            except Exception as db_update_err:
+                 logger.error(f"[Task {task_id}] Failed to update task status to FAILED in DB after worker error: {db_update_err}")
 
 # --- API Key Authentication ---
 # IMPORTANT: Set this environment variable in production!
@@ -77,9 +263,9 @@ def require_api_key(f):
 # --- API Endpoints ---
 
 @app.route('/process', methods=['POST'])
-@require_api_key # Protect this endpoint
+@require_api_key
 def start_processing():
-    """Endpoint to upload a PDF, add to queue, and start OLMOCR processing."""
+    """Endpoint to upload a PDF, add to DB & queue."""
     if 'file' not in request.files:
         return jsonify({"error": "No file part in the request"}), 400
     file = request.files['file']
@@ -127,77 +313,81 @@ def start_processing():
     upload_path = os.path.join(UPLOAD_TEMP_DIR, upload_filename)
 
     try:
-        file.save(upload_path)
-        logger.info(f"File uploaded to: {upload_path}, adding task {task_id} to queue.")
-
-        # Initialize task state (status is 'queued')
-        tasks[task_id] = {
+        # 1. Prepare task data for DB insertion FIRST
+        task_data = {
             "status": "queued",
-            "mode": mode,
-            "start_time": time.time(), # Log when it was added to queue
+            "mode": mode, # Get mode again here
+            "start_time": time.time(),
             "original_filename": file.filename,
-            "logs": [f"{time.strftime('%Y-%m-%d %H:%M:%S')} - Task created and queued (Mode: {mode})"],
+            "logs": [f"{time.strftime('%Y-%m-%d %H:%M:%S')} - Task created and queued"],
             "params": params,
-            "result": {
-                 "jsonl_path": None,
-                 "html_path": None
-            },
+            # Result fields are initially NULL in DB
+            "result": {}, # Keep empty for add_task_to_db compatibility
             "error": None,
             "olmocr_stdout": "",
-            "olmocr_stderr": ""
+            "olmocr_stderr": "",
+            "final_elapsed_time": None
         }
 
-        # --- Queue the task instead of starting a thread directly ---
+        # 2. Add task to Database
+        add_task_to_db(task_id, task_data)
+
+        # 3. Save the file
+        file.save(upload_path)
+        logger.info(f"File uploaded to: {upload_path}")
+
+        # 4. Put the task details (needed by worker) into the queue
         task_queue.put((upload_path, task_id, params))
         logger.info(f"Task {task_id} added to queue. Queue size: {task_queue.qsize()}")
 
         return jsonify({"message": "Processing task added to queue", "task_id": task_id}), 202 # Accepted
 
     except Exception as e:
-        # Handle errors during file save or initial task setup
-        logger.error(f"Error adding task {task_id} to queue: {e}", exc_info=True)
-        # Clean up uploaded file if save was successful but queueing failed (or other error)
+        logger.error(f"Error starting processing task {task_id}: {e}", exc_info=True)
+        # Attempt cleanup
         if os.path.exists(upload_path):
-            try:
-                os.remove(upload_path)
-            except OSError as rm_err:
-                logger.error(f"Failed to remove uploaded file {upload_path} after error: {rm_err}")
-        # Remove task entry if it was created
-        if task_id in tasks:
-            del tasks[task_id]
-        return jsonify({"error": f"Failed to add task to queue: {e}"}), 500
+            try: os.remove(upload_path) 
+            except OSError as rm_err: logger.error(f"Failed to remove uploaded file {upload_path} after error: {rm_err}")
+        # Also attempt to delete from DB if it was added
+        delete_task_from_db(task_id)
+        return jsonify({"error": f"Failed to start processing: {e}"}), 500
 
 @app.route('/process/<task_id>', methods=['GET'])
-@require_api_key # Protect this endpoint
+@require_api_key
 def get_task_status(task_id):
-    """Endpoint to check the status of a processing task."""
-    task = tasks.get(task_id)
-    if not task:
+    """Endpoint to check the status of a processing task from DB."""
+    # --- Fetch task from DB --- 
+    task_dict = get_task_from_db(task_id)
+    # --- End fetch --- 
+
+    if not task_dict:
         return jsonify({"error": "Task not found"}), 404
 
-    task_info = task.copy() # Avoid modifying the original dict directly
+    task_info = task_dict # Use the dictionary fetched from DB
 
-    # --- Determine elapsed time based on status ---
+    # --- Determine elapsed time based on status and stored values ---
     terminal_states = ["completed", "failed", "completed_with_warnings"]
-    if task_info.get("status") in terminal_states and "final_elapsed_time" in task_info:
-        # For terminal states, use the stored final time
-        task_info["elapsed_time_seconds"] = task_info["final_elapsed_time"]
-    elif "start_time" in task_info:
-        # For ongoing states, calculate current elapsed time
-        task_info["elapsed_time_seconds"] = time.time() - task_info["start_time"]
+    current_status = task_info.get("status")
+    final_elapsed = task_info.get("final_elapsed_time")
+    start_time_val = task_info.get("start_time")
+
+    if current_status in terminal_states and final_elapsed is not None:
+        task_info["elapsed_time_seconds"] = final_elapsed
+    elif start_time_val is not None:
+        task_info["elapsed_time_seconds"] = time.time() - start_time_val
     else:
-        # Fallback if start_time is somehow missing
         task_info["elapsed_time_seconds"] = 0
     # --- End of modification ---
 
-    # Add queue position (approximation)
+    # Add queue position (approximation) - this remains based on the live queue
     try:
-        # This is tricky as queue doesn't directly expose elements.
-        # We can only show current size.
         task_info["current_queue_size"] = task_queue.qsize()
-        # A more complex approach would be needed to find exact position.
     except Exception:
-        pass # Ignore errors getting queue size
+        pass 
+
+    # Remove raw DB paths from result dict before sending? No, keep for now.
+    # del task_info['jsonl_path'] 
+    # del task_info['html_path']
 
     return jsonify(task_info), 200
 
@@ -326,88 +516,61 @@ def get_system_status_api():
 @app.route('/tasks/<task_id>', methods=['DELETE'])
 @require_api_key
 def delete_task(task_id):
-    """Endpoint to delete a task record and its associated files."""
+    """Endpoint to delete a task record from DB and its associated files."""
     logger.info(f"Received request to delete task: {task_id}")
 
-    # 1. Find the task
-    task = tasks.get(task_id)
+    # 1. Find the task in DB to get file paths
+    task = get_task_from_db(task_id)
     if not task:
-        logger.warning(f"Delete request failed: Task {task_id} not found.")
+        logger.warning(f"Delete request failed: Task {task_id} not found in DB.")
         return jsonify({"error": "Task not found"}), 404
-
+    
     messages = []
     errors = []
 
-    # 2. Attempt to delete associated files
-    html_path = task.get("result", {}).get("html_path")
-    jsonl_path = task.get("result", {}).get("jsonl_path")
+    # 2. Attempt to delete associated files (using paths from DB record)
+    html_path = task.get("html_path") # Directly access from dict
+    jsonl_path = task.get("jsonl_path") # Directly access from dict
 
     if html_path and isinstance(html_path, str):
         try:
-            if os.path.exists(html_path):
-                os.remove(html_path)
-                msg = f"Deleted HTML file: {html_path}"
-                logger.info(f"[Task {task_id}] {msg}")
-                messages.append(msg)
-            else:
-                msg = f"HTML file not found on disk, skipping deletion: {html_path}"
-                logger.warning(f"[Task {task_id}] {msg}")
-                messages.append(msg)
-        except OSError as e:
-            err_msg = f"Error deleting HTML file {html_path}: {e}"
-            logger.error(f"[Task {task_id}] {err_msg}")
-            errors.append(err_msg)
-    else:
-        messages.append("No HTML file path found in task record.")
+            if os.path.exists(html_path): os.remove(html_path); msg = f"Deleted HTML file: {html_path}"; logger.info(f"[Task {task_id}] {msg}"); messages.append(msg)
+            else: msg = f"HTML file not found on disk: {html_path}"; logger.warning(f"[Task {task_id}] {msg}"); messages.append(msg)
+        except OSError as e: err_msg = f"Error deleting HTML file {html_path}: {e}"; logger.error(f"[Task {task_id}] {err_msg}"); errors.append(err_msg)
+    else: messages.append("No HTML file path found in task record.")
 
     if jsonl_path and isinstance(jsonl_path, str):
         try:
-            if os.path.exists(jsonl_path):
-                os.remove(jsonl_path)
-                msg = f"Deleted JSONL file: {jsonl_path}"
-                logger.info(f"[Task {task_id}] {msg}")
-                messages.append(msg)
-            else:
-                msg = f"JSONL file not found on disk, skipping deletion: {jsonl_path}"
-                logger.warning(f"[Task {task_id}] {msg}")
-                messages.append(msg)
-        except OSError as e:
-            err_msg = f"Error deleting JSONL file {jsonl_path}: {e}"
-            logger.error(f"[Task {task_id}] {err_msg}")
-            errors.append(err_msg)
-    else:
-        messages.append("No JSONL file path found in task record.")
+            if os.path.exists(jsonl_path): os.remove(jsonl_path); msg = f"Deleted JSONL file: {jsonl_path}"; logger.info(f"[Task {task_id}] {msg}"); messages.append(msg)
+            else: msg = f"JSONL file not found on disk: {jsonl_path}"; logger.warning(f"[Task {task_id}] {msg}"); messages.append(msg)
+        except OSError as e: err_msg = f"Error deleting JSONL file {jsonl_path}: {e}"; logger.error(f"[Task {task_id}] {err_msg}"); errors.append(err_msg)
+    else: messages.append("No JSONL file path found in task record.")
         
-    # 3. Remove the task entry from the dictionary
-    try:
-        del tasks[task_id]
-        msg = f"Removed task record {task_id} from memory."
-        logger.info(msg)
-        messages.append(msg)
-    except KeyError:
-        # Should not happen if task was found initially, but handle defensively
-        err_msg = f"Error removing task record {task_id}: Key not found (unexpected)."
-        logger.error(err_msg)
-        errors.append(err_msg)
-        # Still return success overall, as the main goal is deletion, and it's gone
-    
+    # 3. Remove the task entry from the database
+    if delete_task_from_db(task_id):
+        messages.append(f"Removed task record {task_id} from database.")
+    else:
+        # This case means it was already gone from DB, but files might have been deleted
+        errors.append(f"Task record {task_id} was not found in database for deletion (might have been deleted already).")
+
     # 4. Return response
     if errors:
-        # Return 200 OK but indicate errors occurred during file cleanup
-        return jsonify({"message": f"Task {task_id} record removed, but errors occurred during file cleanup.", "details": messages, "errors": errors}), 200
+        return jsonify({"message": f"Task {task_id} deletion process finished with errors.", "details": messages, "errors": errors}), 200
     else:
-        # Return 200 OK with success details
-        return jsonify({"message": f"Task {task_id} and associated files deleted successfully.", "details": messages}), 200
+        return jsonify({"message": f"Task {task_id} deleted successfully.", "details": messages}), 200
 
 if __name__ == '__main__':
     # Ensure UPLOAD_TEMP_DIR exists before running
     os.makedirs(UPLOAD_TEMP_DIR, exist_ok=True)
+    
+    # --- Initialize Database ---
+    init_db()
+    # --- End DB Init ---
 
     # --- Start Worker Threads ---
     logger.info(f"Starting {MAX_WORKERS} processing worker threads...")
     for i in range(MAX_WORKERS):
         worker_thread = threading.Thread(target=processing_worker, daemon=True)
-        # worker_thread.daemon = True # Ensure thread exits when main app exits
         worker_thread.start()
         logger.info(f"Worker thread {i+1} started.")
 
