@@ -62,9 +62,9 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
     run_dir = None
     persistent_pdf_path = None
     persistent_jsonl_path = None
-    current_file_name = os.path.basename(pdf_filepath)
+    # current_file_name_with_uuid = os.path.basename(pdf_filepath) # e.g., safe_base_uuid.ext
     current_logs = [] # Keep track of logs for this run to update DB at once
-    safe_base_name = "" # Initialize safe_base_name earlier
+    # safe_base_name = "" # Will be extracted later
     start_time = time.time() # Record start time for calculating final duration
     olmocr_process = None # Initialize process variable
     actual_processing_start_time = None # Added to store the actual start time
@@ -76,7 +76,7 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
             # Append log to current list for this run
             log_entry = f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {log_message}"
             current_logs.append(log_entry)
-            logger.info(f"[Task {task_id}][{current_file_name}] {log_message}")
+            logger.info(f"[Task {task_id}][{current_file_name_with_uuid}] {log_message}")
             updates["logs"] = json.dumps(current_logs) # Update with full log list (as JSON)
         
         if result_updates: # Should be a dict like {'jsonl_path': path, 'html_path': path}
@@ -110,7 +110,7 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
                  final_time = time.time() - start_time 
                  logger.warning(f"[Task {task_id}] Calculating final elapsed time based on queue start time because actual processing start time was not recorded.")
              updates["final_elapsed_time"] = final_time
-             logger.info(f"[Task {task_id}][{current_file_name}] Recorded final elapsed time: {final_time:.2f} seconds (Based on {'processing start' if actual_processing_start_time else 'queue start'})" )
+             logger.info(f"[Task {task_id}][{current_file_name_with_uuid}] Recorded final elapsed time: {final_time:.2f} seconds (Based on {'processing start' if actual_processing_start_time else 'queue start'})" )
         
         # Call the provided callback function to update the database
         try:
@@ -119,7 +119,19 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
             logger.error(f"[Task {task_id}] Failed to update task status in DB: {db_err}", exc_info=True)
             # Continue processing if possible, but status might be stale in DB
 
-    update_task_status("processing", f"开始处理文件: {current_file_name}")
+    # --- Extract Original Filename Base --- 
+    current_file_name_with_uuid = os.path.basename(pdf_filepath) 
+    base_name_with_uuid, ext = os.path.splitext(current_file_name_with_uuid)
+    uuid_suffix = f"_{task_id}"
+    if base_name_with_uuid.endswith(uuid_suffix):
+        safe_base_name = base_name_with_uuid[:-len(uuid_suffix)] # Extract original safe base
+    else:
+        logger.warning(f"[Task {task_id}] Could not strip UUID suffix '{uuid_suffix}' from base name '{base_name_with_uuid}'. Using full base name for persistent files.")
+        safe_base_name = base_name_with_uuid # Fallback
+    # Log the extraction result
+    logger.info(f"[Task {task_id}] Extracted safe_base_name '{safe_base_name}' and ext '{ext}' from '{current_file_name_with_uuid}'")
+    update_task_status("processing", f"开始处理文件: {safe_base_name}{ext} (UUID: {task_id})") # Use extracted name in log
+    # --- End Extraction ---
 
     try:
         # 1. Create unique temporary directory for this file's OLMOCR output
@@ -128,9 +140,8 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
         update_task_status("processing", f"创建临时 OLMOCR 工作区: {run_dir}")
 
         # 2. Prepare paths and ensure input PDF is accessible
-        base_name_from_upload, _ = os.path.splitext(current_file_name)
-        safe_base_name = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in base_name_from_upload)
-        persistent_pdf_filename = safe_base_name + ".pdf"
+        # safe_base_name is already extracted above
+        persistent_pdf_filename = safe_base_name + ext # Use extracted extension
         persistent_pdf_path = os.path.join(PROCESSED_PDF_DIR, persistent_pdf_filename)
 
         # Ensure the target directory exists before copying
@@ -187,7 +198,7 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
         except Exception as popen_err:
              # Handle potential errors during Popen execution itself
              error_message = f"执行 OLMOCR Popen 时出错: {popen_err}"
-             logger.exception(f"[Task {task_id}] Error during OLMOCR Popen for {current_file_name}")
+             logger.exception(f"[Task {task_id}] Error during OLMOCR Popen for {current_file_name_with_uuid}")
              update_task_status("failed", error_message, error_msg=str(popen_err))
              return # Exit processing for this file
         
@@ -238,9 +249,9 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
         temp_jsonl_path = jsonl_files_temp[0]
 
         if os.path.getsize(temp_jsonl_path) == 0:
-            update_task_status("warning", f"OLMOCR 为 {current_file_name} 生成了空的 JSONL 文件。跳过文本提取和 HTML 预览。")
+            update_task_status("warning", f"OLMOCR 为 {current_file_name_with_uuid} 生成了空的 JSONL 文件。跳过文本提取和 HTML 预览。")
             # Mark as complete with warning, but don't proceed further for this file
-            update_task_status("completed_with_warnings", f"处理 {current_file_name} 完成，但输出为空。")
+            update_task_status("completed_with_warnings", f"处理 {current_file_name_with_uuid} 完成，但输出为空。")
             # No result path to add in this case for JSONL/HTML
             return # Exit the function for this file
 
@@ -252,57 +263,29 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
         update_task_status("processing", f"结果 JSONL 文件已保存到: {persistent_jsonl_path}",
                            result_updates={"jsonl_path": persistent_jsonl_path})
 
-        # 6. Generate HTML Preview
+        # 6. Generate HTML Preview (Simplified Logic)
         # Ensure persistent preview directory exists
         os.makedirs(PROCESSED_PREVIEW_DIR, exist_ok=True)
+        simple_html_filename = safe_base_name + ".html" # Expected output name
+        expected_html_path = os.path.join(PROCESSED_PREVIEW_DIR, simple_html_filename)
+
         viewer_cmd = [
             "python", "-m", "olmocr.viewer.dolmaviewer",
             persistent_jsonl_path,
             "--output_dir", PROCESSED_PREVIEW_DIR
+            # Assuming viewer generates {safe_base_name}.html based on input JSONL/PDF name stem
         ]
         update_task_status("processing", f"执行预览生成命令 (目标目录: {PROCESSED_PREVIEW_DIR}): {' '.join(viewer_cmd)}")
         viewer_process = subprocess.run(viewer_cmd, capture_output=True, text=True, check=False, encoding='utf-8')
         update_task_status("processing", f"HTML 预览生成完成。STDOUT: {viewer_process.stdout} STDERR: {viewer_process.stderr}")
 
         if viewer_process.returncode == 0:
-            # --- Find the HTML file generated by the viewer and rename it --- 
-            # Predict the long filename based on the persistent PDF path (viewer's likely behavior)
-            long_html_filename_pattern = persistent_pdf_path.replace(os.sep, '_').replace('.', '_') + ".html"
-            long_html_path_expected = os.path.join(PROCESSED_PREVIEW_DIR, long_html_filename_pattern)
-            
-            simple_html_filename = safe_base_name + ".html"
-            simple_html_path = os.path.join(PROCESSED_PREVIEW_DIR, simple_html_filename)
-
-            update_task_status("processing", f"检查 viewer 生成的 HTML 文件 (预期长名称): {long_html_path_expected}")
-
-            html_found_and_renamed = False
-            max_wait_html = 5
-            wait_interval_html = 0.5
-            start_wait_html = time.time()
-
-            while time.time() - start_wait_html < max_wait_html:
-                if os.path.exists(long_html_path_expected):
-                    update_task_status("processing", f"找到 viewer 生成的 HTML 文件: {long_html_path_expected}")
-                    try:
-                        # Rename the long-named file to the simple name
-                        os.rename(long_html_path_expected, simple_html_path)
-                        update_task_status("processing", f"已将 HTML 文件重命名为: {simple_html_path}",
-                                           result_updates={"html_path": simple_html_path})
-                        html_found_and_renamed = True
-                        break # Exit loop after successful rename
-                    except OSError as rename_err:
-                        update_task_status("warning", f"重命名 HTML 文件失败 从 {long_html_path_expected} 到 {simple_html_path}: {rename_err}")
-                        break # Exit loop even if rename fails to avoid infinite loop
-                # Check if the simple name already exists (e.g., from a previous run or manual intervention)
-                elif os.path.exists(simple_html_path):
-                    update_task_status("processing", f"找到已存在的简洁名称 HTML 文件: {simple_html_path}",
-                                       result_updates={"html_path": simple_html_path})
-                    html_found_and_renamed = True
-                    break
-                    
-                time.sleep(wait_interval_html)
-
-            if not html_found_and_renamed:
+            # Check if the expected simple HTML file exists
+            if os.path.exists(expected_html_path):
+                update_task_status("processing", f"找到 viewer 生成的 HTML 文件: {expected_html_path}",
+                                   result_updates={"html_path": expected_html_path})
+            else:
+                # Log a warning if the expected file is not found after viewer success
                 update_task_status("warning", f"未找到预期的 HTML 文件...")
         else:
             update_task_status("warning", f"生成 HTML 预览失败。返回码: {viewer_process.returncode}")
@@ -310,11 +293,11 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
         # Mark task as completed successfully 
         # If we reached here without exceptions or specific non-completed statuses set earlier,
         # then it's considered completed.
-        update_task_status("completed", f"文件 {current_file_name} 处理成功。")
+        update_task_status("completed", f"文件 {current_file_name_with_uuid} 处理成功。")
 
     except Exception as e:
-        error_message = f"处理文件 {current_file_name} 时发生错误: {e}"
-        logger.exception(f"[Task {task_id}] Error processing file {current_file_name}")
+        error_message = f"处理文件 {current_file_name_with_uuid} 时发生错误: {e}"
+        logger.exception(f"[Task {task_id}] Error processing file {current_file_name_with_uuid}")
         # Check if the process was running and update wasn't already "cancelled"
         current_db_status = None
         try:
@@ -348,9 +331,9 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
         if run_dir and os.path.exists(run_dir):
             try:
                 shutil.rmtree(run_dir)
-                logger.info(f"[Task {task_id}][{current_file_name}] Cleaned up temporary run directory: {run_dir}")
+                logger.info(f"[Task {task_id}][{current_file_name_with_uuid}] Cleaned up temporary run directory: {run_dir}")
             except OSError as e:
-                logger.error(f"[Task {task_id}][{current_file_name}] Failed to remove temporary run directory {run_dir}: {e}")
+                logger.error(f"[Task {task_id}][{current_file_name_with_uuid}] Failed to remove temporary run directory {run_dir}: {e}")
                 update_task_status("warning", f"无法删除临时运行目录 {run_dir}: {e}")
 
 # --- System Status Function ---
@@ -623,10 +606,9 @@ def export_combined_archive(export_format):
             # base_name now comes from the MD/DOCX file, should match safe_base_name used earlier
             base_name = os.path.splitext(os.path.basename(gen_file_path))[0]
             
-            # --- Construct the simple HTML filename to look for --- 
+            # Construct the simple HTML filename to look for (should match the name used earlier)
             simple_html_filename_to_find = base_name + ".html"
             html_src_path = os.path.join(PROCESSED_PREVIEW_DIR, simple_html_filename_to_find)
-            # --- End of change ---
 
             if os.path.exists(html_src_path):
                 # Destination filename is also the simple name

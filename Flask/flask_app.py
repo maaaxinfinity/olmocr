@@ -370,10 +370,20 @@ def start_processing():
     # --- End Parameter Handling ---
 
     task_id = str(uuid.uuid4())
-    # Sanitize filename for upload path, keep original for task info
-    safe_filename = "".join(c if c.isalnum() or c in ('.', '-', '_') else '_' for c in file.filename)
-    upload_filename = f"{task_id}_{safe_filename}"
+    
+    # --- New Filename Logic --- 
+    original_filename = file.filename
+    base_name, ext = os.path.splitext(original_filename)
+    # Sanitize the base name
+    safe_base_name = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in base_name)
+    # Keep the original extension (lowercase, ensure leading dot if exists)
+    safe_ext = ext.lower() if ext else ''
+    if safe_ext and not safe_ext.startswith('.'):
+        safe_ext = '.' + safe_ext
+    # Construct the unique upload filename: {safe_base}_{task_id}{ext}
+    upload_filename = f"{safe_base_name}_{task_id}{safe_ext}" 
     upload_path = os.path.join(UPLOAD_TEMP_DIR, upload_filename)
+    # --- End New Filename Logic ---
 
     try:
         # 1. Prepare task data for DB insertion FIRST
