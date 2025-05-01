@@ -65,6 +65,7 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params):
     persistent_jsonl_path = None
     current_file_name = os.path.basename(pdf_filepath)
     logs = [] # Store logs for this specific file
+    safe_base_name = "" # Initialize safe_base_name earlier
 
     def update_task_status(status, log_message=None, result=None):
         tasks[task_id]["status"] = status
@@ -73,6 +74,18 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params):
             logger.info(f"[Task {task_id}][{current_file_name}] {log_message}")
         if result:
             tasks[task_id]["result"] = result
+
+        # --- Add final elapsed time when task reaches a terminal state ---
+        terminal_states = ["completed", "failed", "completed_with_warnings"]
+        if status in terminal_states:
+            # Check if start_time exists before calculation
+            if "start_time" in tasks[task_id]:
+                final_time = time.time() - tasks[task_id]["start_time"]
+                tasks[task_id]["final_elapsed_time"] = final_time
+                logger.info(f"[Task {task_id}][{current_file_name}] Recorded final elapsed time: {final_time:.2f} seconds")
+            else:
+                logger.warning(f"[Task {task_id}][{current_file_name}] Cannot record final elapsed time: start_time missing.")
+        # --- End of addition ---
 
     update_task_status("processing", f"开始处理文件: {current_file_name}")
 
@@ -83,10 +96,8 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params):
         update_task_status("processing", f"创建临时 OLMOCR 工作区: {run_dir}")
 
         # 2. Prepare paths and ensure input PDF is accessible
-        # The PDF should already be in a persistent location (UPLOAD_TEMP_DIR or similar)
-        # We will copy it to the persistent PROCESSED_PDF_DIR
-        base_name, _ = os.path.splitext(current_file_name)
-        safe_base_name = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in base_name)
+        base_name_from_upload, _ = os.path.splitext(current_file_name)
+        safe_base_name = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in base_name_from_upload)
         persistent_pdf_filename = safe_base_name + ".pdf"
         persistent_pdf_path = os.path.join(PROCESSED_PDF_DIR, persistent_pdf_filename)
 
@@ -151,7 +162,7 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params):
 
         # Ensure persistent JSONL directory exists
         os.makedirs(PROCESSED_JSONL_DIR, exist_ok=True)
-        persistent_jsonl_filename = f"{safe_base_name}_output.jsonl"
+        persistent_jsonl_filename = f"{safe_base_name}_output.jsonl" # Use safe_base_name here too
         persistent_jsonl_path = os.path.join(PROCESSED_JSONL_DIR, persistent_jsonl_filename)
         shutil.copy(temp_jsonl_path, persistent_jsonl_path)
         update_task_status("processing", f"结果 JSONL 文件已保存到: {persistent_jsonl_path}")
@@ -170,10 +181,12 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params):
         update_task_status("processing", f"HTML 预览生成完成。STDOUT: {viewer_process.stdout} STDERR: {viewer_process.stderr}")
 
         if viewer_process.returncode == 0:
-            # Construct expected HTML filename (using the persistent PDF path)
-            path_for_html_name = persistent_pdf_path.replace(os.sep, '_').replace('.', '_')
-            expected_html_filename = path_for_html_name + ".html"
+            # --- Use simple HTML filename based on safe_base_name --- 
+            # Construct expected HTML filename based on the safe base name derived from the original PDF
+            expected_html_filename = safe_base_name + ".html"
             expected_html_path = os.path.join(PROCESSED_PREVIEW_DIR, expected_html_filename)
+            # --- End of change ---
+            
             update_task_status("processing", f"检查 HTML 文件: {expected_html_path}")
 
             # Wait briefly for the specific file
@@ -184,7 +197,8 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params):
             while time.time() - start_wait_html < max_wait_html:
                 if os.path.exists(expected_html_path):
                     update_task_status("processing", f"找到 HTML 文件: {expected_html_path}")
-                    tasks[task_id]['result']['html_path'] = expected_html_path
+                    # Store the actual found path (which now uses the simple name)
+                    tasks[task_id]['result']['html_path'] = expected_html_path 
                     html_found = True
                     break
                 time.sleep(wait_interval_html)
@@ -487,24 +501,30 @@ def export_combined_archive(export_format):
         copied_html_count = 0
         logs.append("复制 HTML 预览文件...")
         for gen_file_path in generated_files:
+            # base_name now comes from the MD/DOCX file, should match safe_base_name used earlier
             base_name = os.path.splitext(os.path.basename(gen_file_path))[0]
-            # Construct the expected HTML filename from PDF path convention
-            presumed_pdf_path = os.path.join(PROCESSED_PDF_DIR, base_name + ".pdf") # May need adjustment if naming convention changes
-            expected_html_filename = presumed_pdf_path.replace(os.sep, '_').replace('.', '_') + ".html"
-            html_src_path = os.path.join(PROCESSED_PREVIEW_DIR, expected_html_filename)
+            
+            # --- Construct the simple HTML filename to look for --- 
+            simple_html_filename_to_find = base_name + ".html"
+            html_src_path = os.path.join(PROCESSED_PREVIEW_DIR, simple_html_filename_to_find)
+            # --- End of change ---
 
             if os.path.exists(html_src_path):
-                html_dest_path = os.path.join(export_temp_dir, expected_html_filename)
+                # Destination filename is also the simple name
+                html_dest_path = os.path.join(export_temp_dir, simple_html_filename_to_find)
                 try:
                     shutil.copy(html_src_path, html_dest_path)
                     copied_html_count += 1
-                    logger.info(f"Copied HTML: {expected_html_filename}")
+                    # Update log message to reflect simple name being copied
+                    logger.info(f"Copied HTML: {simple_html_filename_to_find}") 
                 except Exception as copy_e:
                     logger.warning(f"无法复制 HTML 文件 {html_src_path}: {copy_e}")
-                    logs.append(f"警告：无法复制 {expected_html_filename}")
+                    # Log the simple name we tried to find
+                    logs.append(f"警告：无法复制 {simple_html_filename_to_find}") 
             else:
-                 logger.warning(f"未找到对应的 HTML 文件: {expected_html_filename} at path {html_src_path}")
-                 logs.append(f"警告：未找到 {expected_html_filename}")
+                 # Log the simple name we tried to find
+                 logger.warning(f"未找到对应的 HTML 文件: {simple_html_filename_to_find} at path {html_src_path}") 
+                 logs.append(f"警告：未找到 {simple_html_filename_to_find}")
 
         logs.append(f"已复制 {copied_html_count} 个 HTML 文件。")
 

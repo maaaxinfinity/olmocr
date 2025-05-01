@@ -6,6 +6,7 @@ import time
 import logging
 from functools import wraps # Import wraps for decorator
 from flask_cors import CORS # Add CORS import
+import queue # Add queue import
 
 # Import utility functions from api_utils
 from api_utils import (
@@ -29,12 +30,34 @@ from api_utils import (
 ensure_dirs()
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}}) # Enable CORS for all origins
+CORS(app, resources={r"/*": {"origins": "api.webui.limitee.cn"}}) # Allow specific origin
 
 # Configure logging to match api_utils
 log_format = '%s(asctime)s - %s(name)s - %s(levelname)s - %s(message)s'
 logging.basicConfig(level=logging.INFO, format=log_format)
 logger = logging.getLogger(__name__)
+
+# --- Task Queue Setup ---
+task_queue = queue.Queue()
+MAX_WORKERS = 1 # Limit to 1 concurrent OLMOCR process for now
+
+def processing_worker():
+    """Worker thread function to process tasks from the queue."""
+    while True:
+        try:
+            logger.info(f"Worker waiting for task... Queue size: {task_queue.qsize()}")
+            upload_path, task_id, params = task_queue.get() # Blocks until a task is available
+            logger.info(f"Worker picked up task {task_id} for file: {upload_path}")
+            # Run the actual processing function from api_utils
+            run_olmocr_on_single_pdf(upload_path, task_id, params)
+            logger.info(f"Worker finished task {task_id}")
+            task_queue.task_done() # Signal that the task is complete
+        except Exception as e:
+            # Log any unexpected error in the worker itself
+            # Task-specific errors should be handled within run_olmocr_on_single_pdf
+            logger.error(f"Error in processing worker: {e}", exc_info=True)
+            # If get() failed or task_done() failed, we might need more robust error handling,
+            # but for now, just log and continue.
 
 # --- API Key Authentication ---
 # IMPORTANT: Set this environment variable in production!
@@ -56,7 +79,7 @@ def require_api_key(f):
 @app.route('/process', methods=['POST'])
 @require_api_key # Protect this endpoint
 def start_processing():
-    """Endpoint to upload a PDF and start OLMOCR processing."""
+    """Endpoint to upload a PDF, add to queue, and start OLMOCR processing."""
     if 'file' not in request.files:
         return jsonify({"error": "No file part in the request"}), 400
     file = request.files['file']
@@ -105,15 +128,15 @@ def start_processing():
 
     try:
         file.save(upload_path)
-        logger.info(f"File uploaded to: {upload_path}")
+        logger.info(f"File uploaded to: {upload_path}, adding task {task_id} to queue.")
 
-        # Initialize task state (including mode)
+        # Initialize task state (status is 'queued')
         tasks[task_id] = {
             "status": "queued",
             "mode": mode,
-            "start_time": time.time(),
+            "start_time": time.time(), # Log when it was added to queue
             "original_filename": file.filename,
-            "logs": [f"{time.strftime('%Y-%m-%d %H:%M:%S')} - Task created (Mode: {mode})"],
+            "logs": [f"{time.strftime('%Y-%m-%d %H:%M:%S')} - Task created and queued (Mode: {mode})"],
             "params": params,
             "result": {
                  "jsonl_path": None,
@@ -124,24 +147,25 @@ def start_processing():
             "olmocr_stderr": ""
         }
 
-        # Start the OLMOCR process in a background thread
-        thread = threading.Thread(
-            target=run_olmocr_on_single_pdf,
-            args=(upload_path, task_id, params) # Pass the validated params
-        )
-        thread.daemon = True
-        thread.start()
+        # --- Queue the task instead of starting a thread directly ---
+        task_queue.put((upload_path, task_id, params))
+        logger.info(f"Task {task_id} added to queue. Queue size: {task_queue.qsize()}")
 
-        return jsonify({"message": "Processing started", "task_id": task_id}), 202
+        return jsonify({"message": "Processing task added to queue", "task_id": task_id}), 202 # Accepted
 
     except Exception as e:
-        logger.error(f"Error starting processing task: {e}", exc_info=True) # Log traceback
+        # Handle errors during file save or initial task setup
+        logger.error(f"Error adding task {task_id} to queue: {e}", exc_info=True)
+        # Clean up uploaded file if save was successful but queueing failed (or other error)
         if os.path.exists(upload_path):
             try:
                 os.remove(upload_path)
             except OSError as rm_err:
                 logger.error(f"Failed to remove uploaded file {upload_path} after error: {rm_err}")
-        return jsonify({"error": f"Failed to start processing: {e}"}), 500
+        # Remove task entry if it was created
+        if task_id in tasks:
+            del tasks[task_id]
+        return jsonify({"error": f"Failed to add task to queue: {e}"}), 500
 
 @app.route('/process/<task_id>', methods=['GET'])
 @require_api_key # Protect this endpoint
@@ -151,9 +175,29 @@ def get_task_status(task_id):
     if not task:
         return jsonify({"error": "Task not found"}), 404
 
-    # Optional: Add elapsed time
     task_info = task.copy() # Avoid modifying the original dict directly
-    task_info["elapsed_time_seconds"] = time.time() - task["start_time"]
+
+    # --- Determine elapsed time based on status ---
+    terminal_states = ["completed", "failed", "completed_with_warnings"]
+    if task_info.get("status") in terminal_states and "final_elapsed_time" in task_info:
+        # For terminal states, use the stored final time
+        task_info["elapsed_time_seconds"] = task_info["final_elapsed_time"]
+    elif "start_time" in task_info:
+        # For ongoing states, calculate current elapsed time
+        task_info["elapsed_time_seconds"] = time.time() - task_info["start_time"]
+    else:
+        # Fallback if start_time is somehow missing
+        task_info["elapsed_time_seconds"] = 0
+    # --- End of modification ---
+
+    # Add queue position (approximation)
+    try:
+        # This is tricky as queue doesn't directly expose elements.
+        # We can only show current size.
+        task_info["current_queue_size"] = task_queue.qsize()
+        # A more complex approach would be needed to find exact position.
+    except Exception:
+        pass # Ignore errors getting queue size
 
     return jsonify(task_info), 200
 
@@ -282,7 +326,21 @@ def get_system_status_api():
 if __name__ == '__main__':
     # Ensure UPLOAD_TEMP_DIR exists before running
     os.makedirs(UPLOAD_TEMP_DIR, exist_ok=True)
+
+    # --- Start Worker Threads ---
+    logger.info(f"Starting {MAX_WORKERS} processing worker threads...")
+    for i in range(MAX_WORKERS):
+        worker_thread = threading.Thread(target=processing_worker, daemon=True)
+        # worker_thread.daemon = True # Ensure thread exits when main app exits
+        worker_thread.start()
+        logger.info(f"Worker thread {i+1} started.")
+
     print(f"INFO: Using API Key: {API_KEY[:4]}...{API_KEY[-4:] if len(API_KEY) > 8 else ''}") # Print partial key for verification
     # Run Flask app (use 0.0.0.0 to be accessible on network)
     # Set debug=True for development only, disable in production
-    app.run(host='0.0.0.0', port=7860, debug=False) 
+    app.run(host='0.0.0.0', port=7860, debug=False)
+
+# Note: When running with a production server like Gunicorn with multiple workers,
+# this simple in-memory queue and worker thread approach will NOT work correctly,
+# as each worker process would have its own queue and threads.
+# A shared queue (like Redis) and dedicated worker processes (like Celery) would be needed. 
