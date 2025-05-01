@@ -217,6 +217,47 @@ def delete_task_from_db(task_id):
     finally:
         if conn:
             conn.close()
+
+def get_all_tasks_from_db():
+    """Retrieves all task records from the database as a list of dictionaries."""
+    conn = None
+    tasks_list = []
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tasks ORDER BY start_time DESC") # Order by start time, newest first
+        rows = cursor.fetchall()
+        for row in rows:
+            # Convert row object to a dictionary
+            task_dict = dict(row)
+            # Deserialize JSON fields
+            try:
+                if task_dict.get('logs'): task_dict['logs'] = json.loads(task_dict['logs'])
+                else: task_dict['logs'] = [] # Default if NULL
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(f"Could not decode logs JSON for task {task_dict.get('task_id')}")
+                task_dict['logs'] = [] # Provide default
+            try:
+                if task_dict.get('params'): task_dict['params'] = json.loads(task_dict['params'])
+                else: task_dict['params'] = {} # Default if NULL
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(f"Could not decode params JSON for task {task_dict.get('task_id')}")
+                task_dict['params'] = {} # Provide default
+                
+            # Reconstruct the nested 'result' dict for compatibility
+            task_dict['result'] = {
+                'jsonl_path': task_dict.get('jsonl_path'),
+                'html_path': task_dict.get('html_path')
+            }
+            tasks_list.append(task_dict)
+        return tasks_list
+    except sqlite3.Error as e:
+        logger.error(f"Failed to get all tasks from DB: {e}", exc_info=True)
+        return [] # Return empty list on error
+    finally:
+        if conn:
+            conn.close()
+
 # --- End Database Setup & Functions ---
 
 # --- Task Queue Setup ---
@@ -513,6 +554,39 @@ def get_system_status_api():
     except Exception as e:
         logger.exception("Error getting system status.")
         return jsonify({"error": f"Failed to get system status: {e}"}), 500
+
+@app.route('/tasks', methods=['GET'])
+@require_api_key
+def get_all_tasks():
+    """Endpoint to retrieve all task records from the database."""
+    logger.info("Received request to get all tasks.")
+    try:
+        all_tasks = get_all_tasks_from_db()
+        # We might need to calculate current elapsed time for ongoing tasks here
+        # similar to get_task_status, or let the frontend handle it.
+        # For simplicity, let's return the raw data for now.
+        # Frontend can calculate elapsed time for non-terminal states if needed.
+        for task_info in all_tasks:
+            terminal_states = ["completed", "failed", "completed_with_warnings"]
+            current_status = task_info.get("status")
+            final_elapsed = task_info.get("final_elapsed_time")
+            start_time_val = task_info.get("start_time")
+
+            if current_status in terminal_states and final_elapsed is not None:
+                task_info["elapsed_time_seconds"] = final_elapsed
+            elif start_time_val is not None:
+                task_info["elapsed_time_seconds"] = time.time() - start_time_val
+            else:
+                task_info["elapsed_time_seconds"] = 0
+                
+            # Add current queue size info (optional, maybe less useful here)
+            try: task_info["current_queue_size"] = task_queue.qsize() 
+            except: pass
+            
+        return jsonify(all_tasks), 200
+    except Exception as e:
+        logger.error(f"Error retrieving all tasks: {e}", exc_info=True)
+        return jsonify({"error": "Failed to retrieve tasks"}), 500
 
 @app.route('/tasks/<task_id>', methods=['DELETE'])
 @require_api_key
