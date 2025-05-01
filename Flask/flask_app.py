@@ -5,7 +5,7 @@ import threading
 import time
 import logging
 from functools import wraps # Import wraps for decorator
-#from flask_cors import CORS # Add CORS import
+from flask_cors import CORS # Add CORS import
 import queue # Add queue import
 
 # Import utility functions from api_utils
@@ -30,10 +30,10 @@ from api_utils import (
 ensure_dirs()
 
 app = Flask(__name__)
-#CORS(app, resources={r"/*": {"origins": ["*.vercel.app", "*.limitee.cn"]}})
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Configure logging to match api_utils
-log_format = '%s(asctime)s - %s(name)s - %s(levelname)s - %s(message)s'
+log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 logging.basicConfig(level=logging.INFO, format=log_format)
 logger = logging.getLogger(__name__)
 
