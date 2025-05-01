@@ -263,29 +263,85 @@ def run_olmocr_on_single_pdf(pdf_filepath, task_id, params, update_callback):
         update_task_status("processing", f"结果 JSONL 文件已保存到: {persistent_jsonl_path}",
                            result_updates={"jsonl_path": persistent_jsonl_path})
 
-        # 6. Generate HTML Preview (Simplified Logic)
+        # 6. Generate HTML Preview (Robust Logic with Rename)
         # Ensure persistent preview directory exists
         os.makedirs(PROCESSED_PREVIEW_DIR, exist_ok=True)
-        simple_html_filename = safe_base_name + ".html" # Expected output name
-        expected_html_path = os.path.join(PROCESSED_PREVIEW_DIR, simple_html_filename)
+
+        # --- Define expected and desired HTML filenames --- 
+        # Predict the potentially long/ugly filename the viewer *might* create based on PDF path
+        # Replace separators and dots, common behavior for path-to-filename conversion
+        long_html_filename_pattern = persistent_pdf_path.replace(os.sep, '_').replace('.', '_') + ".html" 
+        # Handle potential drive letter colon removal on Windows if applicable (basic example)
+        if ':' in long_html_filename_pattern:
+            long_html_filename_pattern = long_html_filename_pattern.split(':', 1)[-1]
+        long_html_path_expected = os.path.join(PROCESSED_PREVIEW_DIR, long_html_filename_pattern)
+        
+        # Define the simple, desired filename 
+        simple_html_filename = safe_base_name + ".html"
+        simple_html_path = os.path.join(PROCESSED_PREVIEW_DIR, simple_html_filename)
+        # --- End Filename Definitions --- 
 
         viewer_cmd = [
             "python", "-m", "olmocr.viewer.dolmaviewer",
             persistent_jsonl_path,
             "--output_dir", PROCESSED_PREVIEW_DIR
-            # Assuming viewer generates {safe_base_name}.html based on input JSONL/PDF name stem
         ]
         update_task_status("processing", f"执行预览生成命令 (目标目录: {PROCESSED_PREVIEW_DIR}): {' '.join(viewer_cmd)}")
         viewer_process = subprocess.run(viewer_cmd, capture_output=True, text=True, check=False, encoding='utf-8')
         update_task_status("processing", f"HTML 预览生成完成。STDOUT: {viewer_process.stdout} STDERR: {viewer_process.stderr}")
 
         if viewer_process.returncode == 0:
-            # Check if the expected simple HTML file exists
-            if os.path.exists(expected_html_path):
-                update_task_status("processing", f"找到 viewer 生成的 HTML 文件: {expected_html_path}",
-                                   result_updates={"html_path": expected_html_path})
-            else:
-                # Log a warning if the expected file is not found after viewer success
+            # --- Find and Rename HTML File --- 
+            update_task_status("processing", f"检查 viewer 生成的 HTML 文件 (预期长名称): {long_html_path_expected} 或 (简洁名称): {simple_html_path}")
+
+            html_found_and_renamed = False
+            max_wait_html = 5 # Seconds to wait for file system changes
+            wait_interval_html = 0.5
+            start_wait_html = time.time()
+            final_html_path = None # Store the path we eventually use
+
+            while time.time() - start_wait_html < max_wait_html:
+                # Prioritize checking for the long/ugly name first
+                if os.path.exists(long_html_path_expected):
+                    update_task_status("processing", f"找到 viewer 生成的长名称 HTML 文件: {long_html_path_expected}")
+                    try:
+                        # Rename the long-named file to the simple name
+                        if os.path.exists(simple_html_path):
+                            # If simple name already exists, remove the long one to avoid conflict? Or just use the existing simple one.
+                            # Let's favour using the existing simple one and remove the long one.
+                            logger.warning(f"简洁 HTML 文件 {simple_html_path} 已存在。删除 viewer 生成的长文件名版本 {long_html_path_expected}")
+                            os.remove(long_html_path_expected)
+                            final_html_path = simple_html_path
+                        else:
+                            os.rename(long_html_path_expected, simple_html_path)
+                            final_html_path = simple_html_path
+                        update_task_status("processing", f"HTML 文件路径确定为 (简洁名称): {final_html_path}",
+                                           result_updates={"html_path": final_html_path})
+                        html_found_and_renamed = True
+                        break # Exit loop after successful rename/confirmation
+                    except OSError as rename_err:
+                        update_task_status("warning", f"重命名/删除 HTML 文件失败 从 {long_html_path_expected} 到 {simple_html_path}: {rename_err}")
+                        # Fallback: Try to use the long name if rename fails?
+                        if os.path.exists(long_html_path_expected):
+                             final_html_path = long_html_path_expected
+                             update_task_status("warning", f"无法重命名，将使用长名称HTML路径: {final_html_path}", result_updates={"html_path": final_html_path})
+                             html_found_and_renamed = True # Mark as found even if not renamed
+                        break # Exit loop even if rename fails 
+                
+                # If long name not found, check if the simple name *already* exists
+                elif os.path.exists(simple_html_path):
+                    update_task_status("processing", f"找到已存在的简洁名称 HTML 文件: {simple_html_path}",
+                                       result_updates={"html_path": simple_html_path})
+                    final_html_path = simple_html_path
+                    html_found_and_renamed = True
+                    break
+                    
+                time.sleep(wait_interval_html)
+
+            if not html_found_and_renamed:
+            # --- End Find and Rename --- 
+
+            # Log a warning if neither file was found after viewer success
                 update_task_status("warning", f"未找到预期的 HTML 文件...")
         else:
             update_task_status("warning", f"生成 HTML 预览失败。返回码: {viewer_process.returncode}")
