@@ -30,7 +30,7 @@ from api_utils import (
 ensure_dirs()
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "api.webui.limitee.cn"}}) # Allow specific origin
+CORS(app, resources={r"/*": {"origins": ["*.vercel.app", "*.limitee.cn"]}})
 
 # Configure logging to match api_utils
 log_format = '%s(asctime)s - %s(name)s - %s(levelname)s - %s(message)s'
