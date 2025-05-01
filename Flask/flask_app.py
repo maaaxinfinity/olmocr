@@ -716,14 +716,14 @@ def delete_task(task_id):
          messages.append(f"Skipping process termination: Task status is '{current_status}', not 'processing'.")
 
     # 3. Update Task Status in DB to 'cancelled' if termination was attempted or successful
-    if process_terminated or (platform.system() == "Linux" and pid_to_terminate and current_status == 'processing'): # Mark cancelled if termination was attempted
-        try:
-            update_task_in_db(task_id, {"status": "cancelled", "error": "Task cancelled by user request.", "process_pid": None}) # Clear PID after cancellation attempt
-            messages.append(f"Updated task {task_id} status to 'cancelled' in database.")
-        except Exception as db_err:
-            err_msg = f"Failed to update task {task_id} status to cancelled in DB: {db_err}"
-            logger.error(f"[Task {task_id}] {err_msg}")
-            errors.append(err_msg)
+    # if process_terminated or (platform.system() == "Linux" and pid_to_terminate and current_status == 'processing'): # Mark cancelled if termination was attempted
+    #     try:
+    #         update_task_in_db(task_id, {"status": "cancelled", "error": "Task cancelled by user request.", "process_pid": None}) # Clear PID after cancellation attempt
+    #         messages.append(f"Updated task {task_id} status to 'cancelled' in database.")
+    #     except Exception as db_err:
+    #         err_msg = f"Failed to update task {task_id} status to cancelled in DB: {db_err}"
+    #         logger.error(f"[Task {task_id}] {err_msg}")
+    #         errors.append(err_msg)
 
     # 4. Attempt to delete associated files (using paths from DB record)
     html_path = task.get("html_path") # Directly access from dict
@@ -746,18 +746,19 @@ def delete_task(task_id):
         except OSError as e: err_msg = f"Error deleting JSONL file {jsonl_path}: {e}"; logger.error(f"[Task {task_id}] {err_msg}"); errors.append(err_msg)
     else: messages.append("No JSONL file path found in task record or path invalid.")
         
-    # 5. DO NOT delete the task entry from the database - keep it with 'cancelled' status
-    # if delete_task_from_db(task_id):
-    #     messages.append(f"Removed task record {task_id} from database.")
-    # else:
-    #     errors.append(f"Task record {task_id} was not found in database for deletion (might have been deleted already or failed cancellation update).")
-    messages.append(f"Kept task record {task_id} in database with status 'cancelled'.")
+    # 5. Remove the task entry from the database
+    if delete_task_from_db(task_id):
+        messages.append(f"Removed task record {task_id} from database.")
+    else:
+        # This case means it was already gone from DB, or DB delete failed
+        errors.append(f"Task record {task_id} was not found in database for deletion (or DB delete failed).")
+    # messages.append(f"Kept task record {task_id} in database with status 'cancelled'.")
 
     # 6. Return response
     if errors:
-        return jsonify({"message": f"Task {task_id} cancellation process finished with errors.", "details": messages, "errors": errors}), 200 # Return 200 even with errors, as action was attempted
+        return jsonify({"message": f"Task {task_id} deletion process finished with errors (process termination attempted/verified, files cleaned).", "details": messages, "errors": errors}), 200 # Return 200 even with errors, as action was attempted
     else:
-        return jsonify({"message": f"Task {task_id} cancelled successfully (process termination attempted/verified, files cleaned).", "details": messages}), 200
+        return jsonify({"message": f"Task {task_id} deleted successfully (process termination attempted/verified, files cleaned, DB record removed).", "details": messages}), 200
 
 if __name__ == '__main__':
     # Ensure UPLOAD_TEMP_DIR exists before running
