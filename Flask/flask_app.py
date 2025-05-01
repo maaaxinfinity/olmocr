@@ -323,6 +323,82 @@ def get_system_status_api():
         logger.exception("Error getting system status.")
         return jsonify({"error": f"Failed to get system status: {e}"}), 500
 
+@app.route('/tasks/<task_id>', methods=['DELETE'])
+@require_api_key
+def delete_task(task_id):
+    """Endpoint to delete a task record and its associated files."""
+    logger.info(f"Received request to delete task: {task_id}")
+
+    # 1. Find the task
+    task = tasks.get(task_id)
+    if not task:
+        logger.warning(f"Delete request failed: Task {task_id} not found.")
+        return jsonify({"error": "Task not found"}), 404
+
+    messages = []
+    errors = []
+
+    # 2. Attempt to delete associated files
+    html_path = task.get("result", {}).get("html_path")
+    jsonl_path = task.get("result", {}).get("jsonl_path")
+
+    if html_path and isinstance(html_path, str):
+        try:
+            if os.path.exists(html_path):
+                os.remove(html_path)
+                msg = f"Deleted HTML file: {html_path}"
+                logger.info(f"[Task {task_id}] {msg}")
+                messages.append(msg)
+            else:
+                msg = f"HTML file not found on disk, skipping deletion: {html_path}"
+                logger.warning(f"[Task {task_id}] {msg}")
+                messages.append(msg)
+        except OSError as e:
+            err_msg = f"Error deleting HTML file {html_path}: {e}"
+            logger.error(f"[Task {task_id}] {err_msg}")
+            errors.append(err_msg)
+    else:
+        messages.append("No HTML file path found in task record.")
+
+    if jsonl_path and isinstance(jsonl_path, str):
+        try:
+            if os.path.exists(jsonl_path):
+                os.remove(jsonl_path)
+                msg = f"Deleted JSONL file: {jsonl_path}"
+                logger.info(f"[Task {task_id}] {msg}")
+                messages.append(msg)
+            else:
+                msg = f"JSONL file not found on disk, skipping deletion: {jsonl_path}"
+                logger.warning(f"[Task {task_id}] {msg}")
+                messages.append(msg)
+        except OSError as e:
+            err_msg = f"Error deleting JSONL file {jsonl_path}: {e}"
+            logger.error(f"[Task {task_id}] {err_msg}")
+            errors.append(err_msg)
+    else:
+        messages.append("No JSONL file path found in task record.")
+        
+    # 3. Remove the task entry from the dictionary
+    try:
+        del tasks[task_id]
+        msg = f"Removed task record {task_id} from memory."
+        logger.info(msg)
+        messages.append(msg)
+    except KeyError:
+        # Should not happen if task was found initially, but handle defensively
+        err_msg = f"Error removing task record {task_id}: Key not found (unexpected)."
+        logger.error(err_msg)
+        errors.append(err_msg)
+        # Still return success overall, as the main goal is deletion, and it's gone
+    
+    # 4. Return response
+    if errors:
+        # Return 200 OK but indicate errors occurred during file cleanup
+        return jsonify({"message": f"Task {task_id} record removed, but errors occurred during file cleanup.", "details": messages, "errors": errors}), 200
+    else:
+        # Return 200 OK with success details
+        return jsonify({"message": f"Task {task_id} and associated files deleted successfully.", "details": messages}), 200
+
 if __name__ == '__main__':
     # Ensure UPLOAD_TEMP_DIR exists before running
     os.makedirs(UPLOAD_TEMP_DIR, exist_ok=True)
