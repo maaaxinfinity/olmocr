@@ -24,7 +24,8 @@ from api_utils import (
     PROCESSED_JSONL_DIR,
     EXPORT_TEMP_DIR_BASE,
     UPLOAD_TEMP_DIR,
-    ensure_dirs
+    ensure_dirs,
+    GRADIO_WORKSPACE_DIR
 )
 
 # Ensure directories exist at startup
